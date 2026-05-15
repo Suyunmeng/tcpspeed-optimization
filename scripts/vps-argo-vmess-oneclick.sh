@@ -6,9 +6,9 @@ set -euo pipefail
 # - TCP optimize: uses the preserved TCP menu-66 entry.
 # - Argo VMess+WS: native cloudflared + Xray + Nginx implementation, no ArgoX install chain.
 
-REPO_RAW_BASE="https://raw.githubusercontent.com/cshaizhihao/speed-slayer/main"
+REPO_RAW_BASE="https://raw.githubusercontent.com/Suyunmeng/tcpspeed-optimization/main"
 SPEED_SLAYER_VERSION="v2.0.8"
-PROJECT_URL="https://github.com/cshaizhihao/speed-slayer"
+PROJECT_URL="https://github.com/Suyunmeng/tcpspeed-optimization"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo .)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd 2>/dev/null || echo .)"
 
@@ -61,7 +61,7 @@ intro() {
   printf " %b%s%b\n" "$C_WHITE" "斩断延迟，撕开隧道，释放节点。" "$C_RESET"
   echo ""
   printf " %b入口：%b输入 %bspeed%b 进入控制台；重启后输入 %bspeed%b 自动续跑。\n" "$C_YELLOW" "$C_RESET" "$C_BOLD$C_GREEN" "$C_RESET" "$C_BOLD$C_GREEN" "$C_RESET"
-  printf " %bGitHub:%b %s  %bVersion:%b %s  %bAuthor:%b NodeSeek @cshaizhihao\n" "$C_CYAN" "$C_RESET" "$PROJECT_URL" "$C_CYAN" "$C_RESET" "$SPEED_SLAYER_VERSION" "$C_CYAN" "$C_RESET"
+  printf " %bGitHub:%b %s  %bVersion:%b %s\n" "$C_CYAN" "$C_RESET" "$PROJECT_URL" "$C_CYAN" "$C_RESET" "$SPEED_SLAYER_VERSION" "$C_CYAN" "$C_RESET"
   echo ""
 }
 
@@ -672,7 +672,7 @@ run_netcheck() {
 
   netcheck_one "IPv4 出站" 'curl -4fsS --max-time 8 https://api.ipify.org' "检查 DNS / 默认路由 / 防火墙" || failed=1
   netcheck_one "DNS 解析" 'getent hosts github.com || nslookup github.com' "检查 /etc/resolv.conf 或 systemd-resolved" || failed=1
-  netcheck_one "GitHub Raw 访问" 'curl -fsS --max-time 12 https://raw.githubusercontent.com/cshaizhihao/speed-slayer/main/README.md' "GitHub 访问异常会影响自更新" || failed=1
+  netcheck_one "GitHub Raw 访问" 'curl -fsS --max-time 12 https://raw.githubusercontent.com/Suyunmeng/tcpspeed-optimization/main/README.md' "GitHub 访问异常会影响自更新" || failed=1
   netcheck_one "Cloudflare 访问" 'curl -fsS --max-time 12 https://www.cloudflare.com/cdn-cgi/trace' "Cloudflare 异常会影响 Argo Tunnel" || failed=1
   netcheck_one "HTTPS/443 出站" 'timeout 8 bash -c "</dev/tcp/1.1.1.1/443"' "检查机房出站 443" || failed=1
   if command -v ping >/dev/null 2>&1; then
@@ -1696,7 +1696,7 @@ health_check() {
 remote_version() {
   local tmp api_url
   tmp="$(mktemp /tmp/speed-slayer-version.XXXXXX)"
-  api_url="https://api.github.com/repos/cshaizhihao/speed-slayer/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
+  api_url="https://api.github.com/repos/Suyunmeng/tcpspeed-optimization/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
   if curl -fsSL -H 'Accept: application/vnd.github.raw' -H 'Cache-Control: no-cache' "$api_url" -o "$tmp" 2>/dev/null; then
     grep -m1 '^SPEED_SLAYER_VERSION=' "$tmp" | cut -d= -f2- | tr -d '"'
   fi
@@ -1741,7 +1741,7 @@ update_self() {
   mkdir -p "$WORK_DIR"
   local api_url raw_url tmp version_after
   tmp="$INSTALLED_BIN.tmp"
-  api_url="https://api.github.com/repos/cshaizhihao/speed-slayer/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
+  api_url="https://api.github.com/repos/Suyunmeng/tcpspeed-optimization/contents/scripts/vps-argo-vmess-oneclick.sh?ref=main&ts=$(date +%s)"
   raw_url="${REPO_RAW_BASE}/scripts/vps-argo-vmess-oneclick.sh?$(date +%s)"
 
   rm -f "$tmp"
@@ -1923,10 +1923,10 @@ uninstall_speed_slayer() {
   success "Speed Slayer 已删除。保留的 .bak 目录可用于排障回溯。"
   echo ""
   echo "如需继续安装，请执行："
-  echo "  bash <(curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh) --all"
+  echo "  bash <(curl -fsSL https://github.com/Suyunmeng/tcpspeed-optimization/raw/main/install.sh) --all"
   echo ""
   echo "如果环境不支持 <(...)，请执行："
-  echo "  curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh -o /tmp/speed-install && bash /tmp/speed-install --all"
+  echo "  curl -fsSL https://github.com/Suyunmeng/tcpspeed-optimization/raw/main/install.sh -o /tmp/speed-install && bash /tmp/speed-install --all"
 }
 
 doctor_check() {

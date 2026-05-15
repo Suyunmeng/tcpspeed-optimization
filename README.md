@@ -83,7 +83,7 @@ curl --version
 ### 进入主菜单
 
 ```bash
-bash <(curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh)
+bash <(curl -fsSL https://github.com/Suyunmeng/tcpspeed-optimization/raw/main/install.sh)
 ```
 
 这条命令会安装 / 刷新 `speed` 快捷命令，并进入控制台。
@@ -91,7 +91,7 @@ bash <(curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.s
 如果你的环境不支持 `<(...)`：
 
 ```bash
-curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh -o /tmp/speed-install && bash /tmp/speed-install
+curl -fsSL https://github.com/Suyunmeng/tcpspeed-optimization/raw/main/install.sh -o /tmp/speed-install && bash /tmp/speed-install
 ```
 
 ---
@@ -99,7 +99,7 @@ curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh -o /t
 ### 完整流程：TCP + Argo
 
 ```bash
-bash <(curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh) --all
+bash <(curl -fsSL https://github.com/Suyunmeng/tcpspeed-optimization/raw/main/install.sh) --all
 ```
 
 或安装后执行：
@@ -113,7 +113,7 @@ speed --all
 ### 只做 TCP 调优
 
 ```bash
-bash <(curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh) --tcp
+bash <(curl -fsSL https://github.com/Suyunmeng/tcpspeed-optimization/raw/main/install.sh) --tcp
 ```
 
 或安装后执行：
@@ -127,7 +127,7 @@ speed --tcp
 ### 只生成 VMess+Argo 节点
 
 ```bash
-bash <(curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh) --argo
+bash <(curl -fsSL https://github.com/Suyunmeng/tcpspeed-optimization/raw/main/install.sh) --argo
 ```
 
 或安装后执行：
@@ -408,7 +408,7 @@ speed --update-self
 如果本机脚本损坏，可重新拉取安装入口：
 
 ```bash
-curl -fsSL https://github.com/cshaizhihao/speed-slayer/raw/main/install.sh -o /tmp/speed-install && bash /tmp/speed-install
+curl -fsSL https://github.com/Suyunmeng/tcpspeed-optimization/raw/main/install.sh -o /tmp/speed-install && bash /tmp/speed-install
 ```
 
 ---
