@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## Unreleased
+
+### Added
+- 新增 `speed --tcp-skyline`，在已有 TCP 调优完成后可选安装 Skyline Speeder。
+- 新增 `speed --skyline` / `speed --skyline-status` 及 TCP 子菜单入口。
+- Skyline 阶段使用 `--prebuilt` 预编译 release，不在目标机安装 clang、LLVM、bpftool 或 Rust 工具链。
+- 根据内存、上传带宽和基线 RTT 自动生成并应用 Skyline 模块与 RACK RTO 参数，保存参数档案和独立日志。
+
+### Documentation
+- README 增加 Skyline Speeder 后置优化的命令、前置条件、自动探测逻辑和环境变量说明。
+
 ## v1.0.0 - 2026-04-28
 
 ### Added

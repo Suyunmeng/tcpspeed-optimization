@@ -38,6 +38,7 @@
 - **XanMod / BBR v3**：自动检测内核状态，安装内核组件，并支持重启后续跑。
 - **容器降级模式**：容器环境不强装宿主机内核，只应用容器内可生效配置。
 - **智能 TCP buffer**：根据 Speedtest 上传带宽推荐缓存档位，并允许手动选择。
+- **Skyline Speeder 后置优化**：可在已有 TCP 调优完成后安装新型 BPF 优化，目标机使用预编译 release，不安装 clang / LLVM / bpftool / Rust 工具链；根据带宽、内存和基线 RTT 自动生成并应用参数。
 - **原生 Argo VMess+WS**：使用 `cloudflared + Xray + Nginx + systemd`，不依赖 ArgoX 安装链。
 - **订阅输出**：生成 VMess URL、Base64、Clash、Shadowrocket、Auto 订阅。
 - **交互控制台**：主菜单、子菜单、返回上级、日志查看、诊断修复一体化。
@@ -180,6 +181,9 @@ speed --update-self    # 更新 speed 自身
 speed --all            # 完整流程：TCP 调优 + Argo 节点
 speed --force-all      # 等同 speed --all
 speed --tcp            # 单独执行 TCP 调优
+speed --tcp-skyline    # 执行已有 TCP 调优，然后安装并自动配置 Skyline Speeder
+speed --skyline        # 仅安装并自动配置 Skyline Speeder（免编译工具链）
+speed --skyline-status # 查看 Skyline Speeder 运行状态
 speed --optimize       # 等同 speed --tcp
 speed --argo           # 单独部署 Argo VMess+WS 节点
 speed --continue       # 根据续跑状态继续当前流程
@@ -194,6 +198,41 @@ speed --repair         # 清理残留并重装 Argo VMess+WS
 speed --clear-state    # 清理重启续跑状态
 speed --uninstall      # 删除 / 卸载 Speed Slayer
 ```
+
+---
+
+### Skyline Speeder 后置优化
+
+在已有 TCP 调优完成后，执行：
+
+```bash
+speed --skyline
+```
+
+如果希望一次完成“已有 TCP 调优 + Skyline Speeder”，执行：
+
+```bash
+speed --tcp-skyline
+```
+
+该阶段会：
+
+1. 检查 Debian / Ubuntu、6.12+ 内核、内核 BTF 和 cgroup v2。
+2. 下载 Skyline Speeder 的 `install.sh` 并调用 `--prebuilt`，只安装预编译 release，不安装编译工具链。
+3. 自动探测内存、Ookla 上传带宽和默认路由基线 RTT。
+4. 按带宽、内存和 RTT 计算 pacing 上限、cwnd 上限、初始窗口、队列护栏、启动/巡航增益与 RTO 参数。
+5. 通过 `ssctl set-module-config` 和 `ssctl set-rack-rto` 在线应用，并保存参数档案和日志。
+
+要求：Skyline Speeder 当前要求 Debian / Ubuntu、Linux 6.12+、`/sys/kernel/btf/vmlinux` 和 cgroup v2。预编译 release 不代表绕过内核要求；不满足条件时脚本会在下载和安装前退出，不会改动 Skyline 配置。
+
+详细日志：`/etc/vps-argo-vmess/skyline-optimize.log`；自动参数档案：`/etc/vps-argo-vmess/skyline-profile.env`。可使用 `speed --skyline-status` 或 `speed --logs skyline` 查看状态。
+
+可选环境变量：
+
+- `SPEED_BANDWIDTH_MBPS=500`：跳过测速，直接指定上传带宽。
+- `SKYLINE_REPO=owner/repo`：指定 Skyline Speeder release 仓库。
+- `SKYLINE_RELEASE=vX.Y.Z`：锁定具体 Skyline release。
+- `SKYLINE_ARTIFACT_URL=/path/to/artifact.tar.gz`：沿用 Skyline 安装器的本地预编译包能力。
 
 ---
 
