@@ -38,7 +38,7 @@
 - **XanMod / BBR v3**：自动检测内核状态，安装内核组件，并支持重启后续跑。
 - **容器降级模式**：容器环境不强装宿主机内核，只应用容器内可生效配置。
 - **智能 TCP buffer**：根据 Speedtest 上传带宽推荐缓存档位，并允许手动选择。
-- **Skyline Speeder 后置优化**：可在已有 TCP 调优完成后安装新型 BPF 优化，目标机使用预编译 release，不安装 clang / LLVM / Rust 编译工具链；运行前自动检查 `bpftool`，缺失时安装系统 BPF 工具包；根据带宽、内存和基线 RTT 自动生成并应用参数。
+- **Skyline Speeder 后置优化**：可在已有 TCP 调优完成后安装新型 BPF 优化，目标机使用预编译 release，不安装 clang / LLVM / Rust 编译工具链；运行前自动检查 `bpftool`，缺失时安装系统 BPF 工具包；默认针对中国大陆长 RTT / 随机丢包链路生成参数。
 - **原生 Argo VMess+WS**：使用 `cloudflared + Xray + Nginx + systemd`，不依赖 ArgoX 安装链。
 - **订阅输出**：生成 VMess URL、Base64、Clash、Shadowrocket、Auto 订阅。
 - **交互控制台**：主菜单、子菜单、返回上级、日志查看、诊断修复一体化。
@@ -236,11 +236,28 @@ speed --tcp-skyline
 3. 执行 `modprobe tcp_cubic`，确认内核的可用拥塞控制列表包含 `cubic`；模块无法加载或内核没有 `cubic` 时立即失败，不继续安装 Skyline。
 4. 将 `tcp_cubic` 写入 `/etc/modules-load.d/99-speed-slayer-cubic.conf`，确保重启后仍可加载，并记录本次变更。
 5. 下载 Skyline Speeder 的 `install.sh` 并调用 `--prebuilt`，只安装预编译 release，不安装 clang、LLVM 或 Rust 编译工具链。
-6. 自动探测内存、Ookla 上传带宽和 `1.1.1.1` 的基线 RTT。
-7. 按带宽、内存和 RTT 计算 pacing 上限、cwnd 上限、初始窗口、队列护栏、启动/巡航增益与 RTO 参数。
-8. 通过 `ssctl set-module-config` 和 `ssctl set-rack-rto` 在线应用，并保存参数档案和日志。
+6. 探测 `www.baidu.com`、`www.qq.com`、`www.aliyun.com` 等中国大陆目标的 RTT；取可达目标的中位数，避免用 `1.1.1.1` 的 Cloudflare 边缘 RTT 代替真实跨境基线。
+7. 使用 Skyline 官方针对随机 10%-20% 丢包、100-300ms RTT 的参数基线：`startup_gain=3.0`、`cruise_inflight_gain=2.0`、`cruise_pacing_gain=1.1`、`guardrail_gain=0.8`、`loss_inflation_max_ratio=0.5`、`max_queue_delay_ms=100`、`initial_cwnd_packets=100`。
+8. 根据测速带宽调整硬上限（pacing 上限至少 1200Mbps，最高 10000Mbps；cwnd 默认 50000 包，小内存机器降低上限），并显式全量写入所有 Skyline 模块参数。
+9. 通过 `ssctl set-rack-rto` 应用官方 RTO 参数：下限 `floor_us=20000`、上限 `ceiling_us=200000`、普通退避倍数 3 倍、拥塞证据下 6 倍；再输出 `ssctl status`。
 
-要求：Skyline Speeder 当前要求 Debian / Ubuntu、Linux 6.12+、`/sys/kernel/btf/vmlinux` 和 cgroup v2。预编译 release 不代表绕过内核要求；不满足条件时脚本会在安装前退出，不会改动 Skyline 配置。缺少 `bpftool` 时只安装系统工具包，不安装编译工具链。
+要求：Skyline Speeder 当前要求 Debian / Ubuntu、Linux 6.12+、`/sys/kernel/btf/vmlinux` 和 cgroup v2。该流程面向中国大陆方向的长 RTT、带宽充足、存在非拥塞性随机丢包的发送端链路；它不会改变 BGP、出口线路或客户端路由，只优化服务器发送端 TCP。预编译 release 不代表绕过内核要求；不满足条件时脚本会在安装前退出，不会改动 Skyline 配置。缺少 `bpftool` 时只安装系统工具包，不安装编译工具链。
+
+RTT 探测默认使用中国大陆目标并取中位数；如果这些目标被 ICMP 或 DNS 屏蔽，可指定：
+
+```bash
+SKYLINE_RTT_TARGET=你的可达大陆目标 speed --skyline
+# 多个目标用空格分隔
+SKYLINE_RTT_TARGET="目标1 目标2 目标3" speed --skyline
+```
+
+动态 RTO 只对 `/sys/fs/cgroup/skyline-speeder` 中新建的连接生效。Skyline 的 `skyline_cc` 主体仍是全局新连接策略；如果要让某个服务获得动态 RTO，需要用 Skyline 提供的包装器启动：
+
+```bash
+sudo /opt/skyline-speeder/infra/run-in-skyline-cgroup.sh <服务启动命令...>
+```
+
+DSCP 重传标记不会被 Speed Slayer 自动开启。它只有在运营商、机房或上游网络明确提供 DSCP 值时才应该手动配置，否则可能被忽略、误分流或限速。确认拿到非零值后，可手动执行 `ssctl set-retransmit-dscp --dscp-value <值>`；不再使用时执行 `ssctl reset-retransmit-dscp`。
 
 如果需要撤销这次特殊优化，执行：
 
@@ -258,6 +275,8 @@ speed --skyline-rollback
 - `SKYLINE_REPO=owner/repo`：指定 Skyline Speeder release 仓库。
 - `SKYLINE_RELEASE=vX.Y.Z`：锁定具体 Skyline release。
 - `SKYLINE_ARTIFACT_URL=/path/to/artifact.tar.gz`：沿用 Skyline 安装器的本地预编译包能力。
+- `SKYLINE_RTT_TARGET=host`：覆盖默认中国大陆 RTT 探测目标；也可填写空格分隔的多个目标。
+- `SKYLINE_RTT_FALLBACK_MS=180`：所有 RTT 目标不可达时的保守回退值，默认 180ms。
 
 ---
 

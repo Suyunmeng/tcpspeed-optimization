@@ -8,10 +8,12 @@
 - Skyline 阶段使用 `--prebuilt` 预编译 release，不在目标机安装 clang、LLVM 或 Rust 编译工具链。
 - Skyline 安装前检查 `bpftool` 和 `tcp_cubic`；缺失 `bpftool` 时自动安装 `linux-tools-common`、`linux-tools-generic`，无法加载或验证 `cubic` 时终止。
 - 根据内存、上传带宽和基线 RTT 自动生成并应用 Skyline 模块与 RACK RTO 参数，保存参数档案和独立日志。
-- Skyline 回滚调用官方卸载流程恢复安装前 TCP 配置，并单独清理 Speed Slayer 写入的 `tcp_cubic` 持久化记录。
+- Skyline 自动调参改为面向中国大陆方向长 RTT / 随机丢包链路：使用大陆目标 RTT 中位数，不再探测 `1.1.1.1` Cloudflare 边缘 RTT。
+- 调参基线对齐 Skyline 官方生产档：固定 `startup/cruise/guardrail/loss` 系数，使用 20ms/200ms RTO 下限边界和 3x/6x RTO 退避上限。
+- 增加动态 RTO cgroup 作用域提示，明确该功能只对 `/sys/fs/cgroup/skyline-speeder` 内新建连接生效；不自动写入 DSCP，避免误用未知运营商策略。
 
 ### Documentation
-- README 增加 Skyline Speeder 后置优化的命令、前置条件、自动探测逻辑、回滚说明和环境变量说明。
+- README 增加 Skyline Speeder 中国大陆方向 RTT 探测、官方参数基线、动态 RTO cgroup 作用域、DSCP 安全边界、回滚说明和环境变量说明。
 
 ## v1.0.0 - 2026-04-28
 
