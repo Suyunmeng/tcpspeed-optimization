@@ -38,7 +38,7 @@
 - **XanMod / BBR v3**：自动检测内核状态，安装内核组件，并支持重启后续跑。
 - **容器降级模式**：容器环境不强装宿主机内核，只应用容器内可生效配置。
 - **智能 TCP buffer**：根据 Speedtest 上传带宽推荐缓存档位，并允许手动选择。
-- **Skyline Speeder 后置优化**：可在已有 TCP 调优完成后安装新型 BPF 优化，目标机使用预编译 release，不安装 clang / LLVM / bpftool / Rust 工具链；根据带宽、内存和基线 RTT 自动生成并应用参数。
+- **Skyline Speeder 后置优化**：可在已有 TCP 调优完成后安装新型 BPF 优化，目标机使用预编译 release，不安装 clang / LLVM / Rust 编译工具链；运行前自动检查 `bpftool`，缺失时安装系统 BPF 工具包；根据带宽、内存和基线 RTT 自动生成并应用参数。
 - **原生 Argo VMess+WS**：使用 `cloudflared + Xray + Nginx + systemd`，不依赖 ArgoX 安装链。
 - **订阅输出**：生成 VMess URL、Base64、Clash、Shadowrocket、Auto 订阅。
 - **交互控制台**：主菜单、子菜单、返回上级、日志查看、诊断修复一体化。
@@ -168,6 +168,19 @@ speed
 - 查看状态、查看节点、查看日志、诊断等操作执行完后，会提示按回车返回当前子菜单。
 - 如果存在续跑状态，执行 `speed` 会自动继续当前流程。
 
+TCP 子菜单包含：
+
+```text
+1. 查看 TCP / BBR / 内核状态
+2. 执行 TCP 优化
+3. TCP 优化 + Skyline Speeder 后置优化
+4. 单独安装 / 自动配置 Skyline Speeder
+5. 查看 Skyline Speeder 状态
+6. 重启后继续安装
+7. 回滚 Skyline Speeder 特殊优化
+0. 返回主页
+```
+
 ---
 
 ## 常用命令
@@ -184,6 +197,7 @@ speed --tcp            # 单独执行 TCP 调优
 speed --tcp-skyline    # 执行已有 TCP 调优，然后安装并自动配置 Skyline Speeder
 speed --skyline        # 仅安装并自动配置 Skyline Speeder（免编译工具链）
 speed --skyline-status # 查看 Skyline Speeder 运行状态
+speed --skyline-rollback # 卸载 Skyline 并回滚特殊优化配置
 speed --optimize       # 等同 speed --tcp
 speed --argo           # 单独部署 Argo VMess+WS 节点
 speed --continue       # 根据续跑状态继续当前流程
@@ -218,14 +232,25 @@ speed --tcp-skyline
 该阶段会：
 
 1. 检查 Debian / Ubuntu、6.12+ 内核、内核 BTF 和 cgroup v2。
-2. 下载 Skyline Speeder 的 `install.sh` 并调用 `--prebuilt`，只安装预编译 release，不安装编译工具链。
-3. 自动探测内存、Ookla 上传带宽和默认路由基线 RTT。
-4. 按带宽、内存和 RTT 计算 pacing 上限、cwnd 上限、初始窗口、队列护栏、启动/巡航增益与 RTO 参数。
-5. 通过 `ssctl set-module-config` 和 `ssctl set-rack-rto` 在线应用，并保存参数档案和日志。
+2. 检查 `bpftool`；如果缺失，执行 `apt install -y linux-tools-common linux-tools-generic`（前置步骤会先刷新 APT 索引），安装后仍找不到命令则终止。
+3. 执行 `modprobe tcp_cubic`，确认内核的可用拥塞控制列表包含 `cubic`；模块无法加载或内核没有 `cubic` 时立即失败，不继续安装 Skyline。
+4. 将 `tcp_cubic` 写入 `/etc/modules-load.d/99-speed-slayer-cubic.conf`，确保重启后仍可加载，并记录本次变更。
+5. 下载 Skyline Speeder 的 `install.sh` 并调用 `--prebuilt`，只安装预编译 release，不安装 clang、LLVM 或 Rust 编译工具链。
+6. 自动探测内存、Ookla 上传带宽和 `1.1.1.1` 的基线 RTT。
+7. 按带宽、内存和 RTT 计算 pacing 上限、cwnd 上限、初始窗口、队列护栏、启动/巡航增益与 RTO 参数。
+8. 通过 `ssctl set-module-config` 和 `ssctl set-rack-rto` 在线应用，并保存参数档案和日志。
 
-要求：Skyline Speeder 当前要求 Debian / Ubuntu、Linux 6.12+、`/sys/kernel/btf/vmlinux` 和 cgroup v2。预编译 release 不代表绕过内核要求；不满足条件时脚本会在下载和安装前退出，不会改动 Skyline 配置。
+要求：Skyline Speeder 当前要求 Debian / Ubuntu、Linux 6.12+、`/sys/kernel/btf/vmlinux` 和 cgroup v2。预编译 release 不代表绕过内核要求；不满足条件时脚本会在安装前退出，不会改动 Skyline 配置。缺少 `bpftool` 时只安装系统工具包，不安装编译工具链。
 
-详细日志：`/etc/vps-argo-vmess/skyline-optimize.log`；自动参数档案：`/etc/vps-argo-vmess/skyline-profile.env`。可使用 `speed --skyline-status` 或 `speed --logs skyline` 查看状态。
+如果需要撤销这次特殊优化，执行：
+
+```bash
+speed --skyline-rollback
+```
+
+回滚会调用 Skyline 官方 `--uninstall`，停止并删除 Skyline 服务、程序与 BPF 对象，并恢复 Skyline 记录的安装前拥塞控制和队列配置。Speed Slayer 只删除本次新增的 `tcp_cubic` 持久化记录，不强制卸载正在使用的内核模块；`bpftool` 属于系统工具，回滚时会保留。回滚前会要求确认，回滚失败时会保留记录和日志，便于重试。
+
+详细日志：`/etc/vps-argo-vmess/skyline-optimize.log`；自动参数档案：`/etc/vps-argo-vmess/skyline-profile.env`；回滚记录：`/etc/vps-argo-vmess/skyline-rollback.env`。可使用 `speed --skyline-status` 或 `speed --logs skyline` 查看状态。
 
 可选环境变量：
 
@@ -380,6 +405,7 @@ speed --speedtest
 /etc/vps-argo-vmess/tcp-optimize.log
 /etc/vps-argo-vmess/speedtest.log
 /etc/vps-argo-vmess/netcheck.log
+/etc/vps-argo-vmess/skyline-optimize.log
 /etc/argox/argo.log
 /etc/argox/xray-error.log
 ```

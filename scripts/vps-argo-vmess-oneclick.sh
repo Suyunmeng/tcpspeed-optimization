@@ -26,11 +26,12 @@ DEFAULT_NGINX_PORT="8001"
 DEFAULT_WS_PATH="argox"
 DEFAULT_NODE_NAME="Speed-Slayer"
 
-# Skyline Speeder 后置优化：始终走 --prebuilt，目标机不安装 clang/LLVM/bpftool/Rust。
+# Skyline Speeder 后置优化：始终走 --prebuilt，不安装 clang/LLVM/Rust 编译工具链；运行前按需安装 bpftool。
 SKYLINE_REPO_DEFAULT="CYBERVERSE-Research/skyline-speeder"
 SKYLINE_INSTALLER_URL="${SKYLINE_INSTALLER_URL:-https://raw.githubusercontent.com/CYBERVERSE-Research/skyline-speeder/main/install.sh}"
 SKYLINE_LOG_FILE="${WORK_DIR}/skyline-optimize.log"
 SKYLINE_PROFILE_FILE="${WORK_DIR}/skyline-profile.env"
+SKYLINE_ROLLBACK_FILE="${WORK_DIR}/skyline-rollback.env"
 TCP_OPTIMIZE_COMPLETED=0
 
 if [ -t 1 ]; then
@@ -620,6 +621,76 @@ skyline_download_installer() {
   chmod 700 "$out"
 }
 
+skyline_prepare_kernel() {
+  require_root
+  mkdir -p "$WORK_DIR"
+  : > "$SKYLINE_LOG_FILE"
+
+  if ! command -v bpftool >/dev/null 2>&1; then
+    info "未检测到 bpftool，安装 Linux BPF 工具包。"
+    command -v apt-get >/dev/null 2>&1 || {
+      err "缺少 bpftool，且当前系统没有 apt-get，无法继续 Skyline Speeder。"
+      return 1
+    }
+    apt-get update -y >>"$SKYLINE_LOG_FILE" 2>&1 || {
+      err "apt-get update 失败，日志：$SKYLINE_LOG_FILE"
+      return 1
+    }
+    apt-get install -y linux-tools-common linux-tools-generic >>"$SKYLINE_LOG_FILE" 2>&1 || {
+      err "bpftool 安装失败，日志：$SKYLINE_LOG_FILE"
+      return 1
+    }
+  fi
+  command -v bpftool >/dev/null 2>&1 || {
+    err "安装后仍未找到 bpftool，无法继续 Skyline Speeder。"
+    return 1
+  }
+  info "bpftool：$(bpftool version 2>/dev/null | head -n 1 || echo available)"
+
+  command -v modprobe >/dev/null 2>&1 || {
+    err "缺少 modprobe，无法加载内核 tcp_cubic 模块。"
+    return 1
+  }
+  if ! modprobe tcp_cubic >>"$SKYLINE_LOG_FILE" 2>&1; then
+    err "当前内核无法加载 tcp_cubic，Skyline Speeder 安装已终止。"
+    return 1
+  fi
+  if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw cubic; then
+    err "当前内核没有可用的 cubic 拥塞控制，Skyline Speeder 安装已终止。"
+    return 1
+  fi
+
+  local cubic_modules_file="/etc/modules-load.d/99-speed-slayer-cubic.conf"
+  local module_state="unchanged"
+  if [ -r "$SKYLINE_ROLLBACK_FILE" ]; then
+    # Preserve the first-run state so a repeated Skyline invocation cannot
+    # forget that this file or line was created by Speed Slayer.
+    # shellcheck disable=SC1090
+    . "$SKYLINE_ROLLBACK_FILE"
+    case "${SKYLINE_CUBIC_MODULE_STATE:-}" in
+      created|appended|unchanged)
+        success "内核 cubic 已加载并验证可用；沿用现有 Skyline 回滚记录。"
+        return 0
+        ;;
+    esac
+  fi
+  if [ ! -e "$cubic_modules_file" ]; then
+    printf '%s\n' tcp_cubic > "$cubic_modules_file"
+    module_state="created"
+  elif grep -qw '^tcp_cubic$' "$cubic_modules_file"; then
+    module_state="unchanged"
+  else
+    printf '\n%s\n' tcp_cubic >> "$cubic_modules_file"
+    module_state="appended"
+  fi
+  cat > "$SKYLINE_ROLLBACK_FILE" <<EOF
+SKYLINE_CUBIC_MODULE_FILE=$(printf '%q' "$cubic_modules_file")
+SKYLINE_CUBIC_MODULE_STATE=$(printf '%q' "$module_state")
+EOF
+  chmod 600 "$SKYLINE_ROLLBACK_FILE"
+  success "内核 cubic 已加载并验证可用；已准备 Skyline 回滚记录。"
+}
+
 skyline_preflight() {
   [ "$(id -u)" = "0" ] || { err "Skyline Speeder 需要 root 权限。"; return 1; }
   [ -r /etc/os-release ] || { err "Skyline Speeder 仅支持 Debian/Ubuntu，无法读取 /etc/os-release。"; return 1; }
@@ -692,6 +763,78 @@ skyline_status() {
   fi
 }
 
+skyline_is_installed() {
+  [ -e /usr/local/sbin/skyline-speederd ] ||
+    [ -e /usr/local/bin/skyline-speederd ] ||
+    { command -v ssctl >/dev/null 2>&1; } ||
+    { systemctl cat skyline-speederd.service >/dev/null 2>&1; } ||
+    { systemctl cat skyline-speeder-enable.service >/dev/null 2>&1; }
+}
+
+skyline_restore_kernel_record() {
+  if [ -r "$SKYLINE_ROLLBACK_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$SKYLINE_ROLLBACK_FILE"
+    case "${SKYLINE_CUBIC_MODULE_STATE:-unchanged}" in
+      created)
+        rm -f "${SKYLINE_CUBIC_MODULE_FILE:-/etc/modules-load.d/99-speed-slayer-cubic.conf}"
+        ;;
+      appended)
+        sed -i '/^tcp_cubic$/d' \
+          "${SKYLINE_CUBIC_MODULE_FILE:-/etc/modules-load.d/99-speed-slayer-cubic.conf}" \
+          2>/dev/null || true
+        ;;
+    esac
+  fi
+  rm -f "$SKYLINE_ROLLBACK_FILE"
+}
+
+skyline_rollback() {
+  require_root
+  render_header_once
+  section "Speed Slayer · Skyline Speeder 回滚"
+  if ! confirm_action "确认卸载 Skyline Speeder 并恢复安装前 TCP 配置？默认回车 = Y"; then
+    warn "已取消 Skyline Speeder 回滚。"
+    return 0
+  fi
+
+  local skyline_installed=0
+  skyline_is_installed && skyline_installed=1
+  if [ "$skyline_installed" -eq 0 ] && [ ! -e "$SKYLINE_ROLLBACK_FILE" ]; then
+    warn "未检测到 Skyline Speeder 安装或回滚记录。"
+    return 0
+  fi
+
+  mkdir -p "$WORK_DIR"
+  local installer install_rc=0
+  if [ "$skyline_installed" -eq 1 ]; then
+    installer="$(mktemp /tmp/skyline-speeder-uninstall.XXXXXX.sh)"
+    if ! skyline_download_installer "$installer" >>"$SKYLINE_LOG_FILE" 2>&1; then
+      rm -f "$installer"
+      err "Skyline Speeder 卸载器下载/校验失败，未执行回滚；日志：$SKYLINE_LOG_FILE"
+      return 1
+    fi
+    bash "$installer" --uninstall >>"$SKYLINE_LOG_FILE" 2>&1 || install_rc=$?
+    rm -f "$installer"
+    if [ "$install_rc" -ne 0 ]; then
+      err "Skyline Speeder 卸载失败（退出码 $install_rc），未清理回滚记录；日志：$SKYLINE_LOG_FILE"
+      tail -n 60 "$SKYLINE_LOG_FILE" || true
+      return "$install_rc"
+    fi
+  else
+    info "未检测到 Skyline 服务，仅清理 Speed Slayer 的内核前置变更。"
+  fi
+
+  skyline_restore_kernel_record
+  rm -f "$SKYLINE_PROFILE_FILE"
+  if [ "$skyline_installed" -eq 1 ]; then
+    success "Skyline Speeder 已回滚；bpftool 保留为系统工具，tcp_cubic 模块不强制卸载。"
+  else
+    success "Skyline 内核前置变更已回滚；bpftool 保留为系统工具，tcp_cubic 模块不强制卸载。"
+  fi
+  echo "详细日志：$SKYLINE_LOG_FILE"
+}
+
 run_skyline_optimize() {
   require_root
   render_header_once
@@ -701,11 +844,12 @@ run_skyline_optimize() {
     return 0
   fi
   info "将先安装 Skyline Speeder 已发布预编译包，再自动探测并应用参数。"
-  info "目标机不会安装 clang、LLVM、bpftool 或 Rust 编译工具链。"
+  info "目标机不会安装 clang、LLVM 或 Rust 编译工具链；缺少 bpftool 时自动安装系统工具包。"
   skyline_preflight || return 1
-
   mkdir -p "$WORK_DIR"
   : > "$SKYLINE_LOG_FILE"
+  skyline_prepare_kernel || return 1
+
   local mem_mb bandwidth rtt_ms installer
   mem_mb="$(detect_memory_mb)"; mem_mb="$(skyline_value_or_default "$mem_mb" 1024)"
   if [ -n "${SPEED_BANDWIDTH_MBPS:-}" ] && printf '%s' "$SPEED_BANDWIDTH_MBPS" | grep -Eq '^[0-9]+$'; then
@@ -2258,6 +2402,7 @@ Commands:
   --tcp-skyline          执行已有 TCP 调优后，再安装并自动配置 Skyline Speeder
   --skyline              安装并自动配置 Skyline Speeder（免编译工具链）
   --skyline-status       查看 Skyline Speeder 状态
+  --skyline-rollback     卸载并回滚 Skyline Speeder 特殊优化配置
   --optimize             单独执行 TCP 调优流程：BBR/XanMod/容器降级 + 网络参数
   --argo                 单独执行 Argo VMess+WS 节点流程（等同 --install-argo-vmess）
   --install-argo-vmess   单独安装/重装 Argo VMess+WS，并生成节点/订阅 URL
@@ -2275,7 +2420,7 @@ Commands:
   --summary              输出结果摘要
   --health               安装后健康检查
   --doctor               一键诊断：环境检测 + 结果摘要 + 健康检查
-  --logs [type]          查看日志：install/kernel/tcp/argo/xray
+  --logs [type]          查看日志：install/kernel/tcp/skyline/argo/xray
   --repair               清理残留并重装 Argo VMess+WS
   --uninstall            删除 Speed Slayer 相关服务、配置、状态和 speed 命令
   --speedtest            执行 Ookla Speedtest 测速
@@ -2342,6 +2487,7 @@ menu_section_tcp() {
 4. 单独安装 / 自动配置 Skyline Speeder
 5. 查看 Skyline Speeder 状态
 6. 重启后继续安装
+7. 回滚 Skyline Speeder 特殊优化
 0. 返回主页
 EOF
     read -r -p "请选择: " choice
@@ -2352,6 +2498,7 @@ EOF
       4) run_skyline_optimize; menu_pause ;;
       5) skyline_status; menu_pause ;;
       6) continue_after_reboot; menu_pause ;;
+      7) skyline_rollback; menu_pause ;;
       0) return 0 ;;
       *) err "无效选择"; menu_pause ;;
     esac
@@ -2460,6 +2607,7 @@ case "${1:-}" in
   --tcp-skyline) run_tcp_then_skyline ;;
   --skyline) run_skyline_optimize ;;
   --skyline-status) skyline_status ;;
+  --skyline-rollback) skyline_rollback ;;
   --optimize) run_tcp_optimize ;;
   --argo) install_argo_vmess_ws ;;
   --install-argo-vmess) install_argo_vmess_ws ;;
