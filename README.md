@@ -236,20 +236,32 @@ speed --tcp-skyline
 3. 执行 `modprobe tcp_cubic`，确认内核的可用拥塞控制列表包含 `cubic`；模块无法加载或内核没有 `cubic` 时立即失败，不继续安装 Skyline。
 4. 将 `tcp_cubic` 写入 `/etc/modules-load.d/99-speed-slayer-cubic.conf`，确保重启后仍可加载，并记录本次变更。
 5. 下载 Skyline Speeder 的 `install.sh` 并调用 `--prebuilt`，只安装预编译 release，不安装 clang、LLVM 或 Rust 编译工具链。
-6. 探测 `www.baidu.com`、`www.qq.com`、`www.aliyun.com` 等中国大陆目标的 RTT；取可达目标的中位数，避免用 `1.1.1.1` 的 Cloudflare 边缘 RTT 代替真实跨境基线。
-7. 使用 Skyline 官方针对随机 10%-20% 丢包、100-300ms RTT 的参数基线：`startup_gain=3.0`、`cruise_inflight_gain=2.0`、`cruise_pacing_gain=1.1`、`guardrail_gain=0.8`、`loss_inflation_max_ratio=0.5`、`max_queue_delay_ms=100`、`initial_cwnd_packets=100`。
-8. 根据测速带宽调整硬上限（pacing 上限至少 1200Mbps，最高 10000Mbps；cwnd 默认 50000 包，小内存机器降低上限），并显式全量写入所有 Skyline 模块参数。
-9. 通过 `ssctl set-rack-rto` 应用官方 RTO 参数：下限 `floor_us=20000`、上限 `ceiling_us=200000`、普通退避倍数 3 倍、拥塞证据下 6 倍；再输出 `ssctl status`。
+6. 使用 UDP 探针测试 `101.94.166.1:443`、`139.226.226.2:443`、`120.204.34.85:443`，记录响应率、RTT 中位数和抖动，并选择三个目标中最差（RTT 最大）的目标作为基线；无响应目标按最差情况处理。探针使用 `hping3`，不使用 ICMP ping。
+7. 这三个地址不是 iperf3 服务器，因此 UDP 443 探针只提供小包路径 RTT、响应率和抖动，不能等同于固定速率 UDP 吞吐或真实数据面丢包测试；上传带宽继续使用 Ookla Speedtest 或 `SPEED_BANDWIDTH_MBPS` 手动值作为配置辅助。若三个目标均无响应，则使用默认 Skyline 参数档和保守回退 RTT，不根据不可观测数据激进调参。
+8. 使用 Skyline 官方针对随机 10%-20% 丢包、100-300ms RTT 的参数基线：`startup_gain=3.0`、`cruise_inflight_gain=2.0`、`cruise_pacing_gain=1.1`、`guardrail_gain=0.8`、`loss_inflation_max_ratio=0.5`、`max_queue_delay_ms=100`、`initial_cwnd_packets=100`。
+9. 根据测速带宽调整硬上限（pacing 上限至少 1200Mbps，最高 10000Mbps；cwnd 默认 50000 包，小内存机器降低上限），并显式全量写入所有 Skyline 模块参数。
+10. 通过 `ssctl set-rack-rto` 应用官方 RTO 参数：下限 `floor_us=20000`、上限 `ceiling_us=200000`、普通退避倍数 3 倍、拥塞证据下 6 倍；再输出 `ssctl status`。
 
 要求：Skyline Speeder 当前要求 Debian / Ubuntu、Linux 6.12+、`/sys/kernel/btf/vmlinux` 和 cgroup v2。该流程面向中国大陆方向的长 RTT、带宽充足、存在非拥塞性随机丢包的发送端链路；它不会改变 BGP、出口线路或客户端路由，只优化服务器发送端 TCP。预编译 release 不代表绕过内核要求；不满足条件时脚本会在安装前退出，不会改动 Skyline 配置。缺少 `bpftool` 时只安装系统工具包，不安装编译工具链。
 
-RTT 探测默认使用中国大陆目标并取中位数；如果这些目标被 ICMP 或 DNS 屏蔽，可指定：
+UDP RTT 探测默认使用以下三个目标的 UDP 443 小包探针，并取最差目标的数据：
+
+- `101.94.166.1:443`
+- `139.226.226.2:443`
+- `120.204.34.85:443`
+
+这些地址不是 iperf3 服务器，Speed Slayer 不会把它们当作 `iperf3 -c` 对端。探针记录 UDP/ICMP 响应带来的 RTT、响应率和抖动，不能替代 Skyline 文档所述的固定速率 UDP iperf3 吞吐/丢包测试；带宽仍使用 Ookla 上传测速或手动值。三个目标全部没有响应时，使用默认 Skyline 参数档和 `SKYLINE_RTT_FALLBACK_MS` 保守回退 RTT。
+
+可指定探测参数：
 
 ```bash
-SKYLINE_RTT_TARGET=你的可达大陆目标 speed --skyline
-# 多个目标用空格分隔
-SKYLINE_RTT_TARGET="目标1 目标2 目标3" speed --skyline
+SKYLINE_UDP_TARGETS="101.94.166.1 139.226.226.2 120.204.34.85" speed --skyline
+SKYLINE_UDP_PORT=443 speed --skyline
+SKYLINE_UDP_PROBE_COUNT=3 speed --skyline
+SKYLINE_RTT_FALLBACK_MS=180 speed --skyline
 ```
+
+探测明细会写入 `skyline-profile.env` 和 `skyline-optimize.log`；无响应目标会按最差情况记录，不会被忽略。
 
 动态 RTO 只对 `/sys/fs/cgroup/skyline-speeder` 中新建的连接生效。Skyline 的 `skyline_cc` 主体仍是全局新连接策略；如果要让某个服务获得动态 RTO，需要用 Skyline 提供的包装器启动：
 
@@ -275,8 +287,10 @@ speed --skyline-rollback
 - `SKYLINE_REPO=owner/repo`：指定 Skyline Speeder release 仓库。
 - `SKYLINE_RELEASE=vX.Y.Z`：锁定具体 Skyline release。
 - `SKYLINE_ARTIFACT_URL=/path/to/artifact.tar.gz`：沿用 Skyline 安装器的本地预编译包能力。
-- `SKYLINE_RTT_TARGET=host`：覆盖默认中国大陆 RTT 探测目标；也可填写空格分隔的多个目标。
-- `SKYLINE_RTT_FALLBACK_MS=180`：所有 RTT 目标不可达时的保守回退值，默认 180ms。
+- `SKYLINE_UDP_TARGETS="host1 host2 host3"`：覆盖默认的三个 UDP 443 探测目标。
+- `SKYLINE_UDP_PORT=443`：设置 UDP 探测端口，默认 `443`。
+- `SKYLINE_UDP_PROBE_COUNT=3`：每个目标的 UDP 探针数量，默认 `3`。
+- `SKYLINE_RTT_FALLBACK_MS=180`：所有 UDP 目标均无响应时的保守回退 RTT，默认 `180ms`。
 
 ---
 
