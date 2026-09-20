@@ -33,9 +33,12 @@ SKYLINE_LOG_FILE="${WORK_DIR}/skyline-optimize.log"
 SKYLINE_PROFILE_FILE="${WORK_DIR}/skyline-profile.env"
 SKYLINE_ROLLBACK_FILE="${WORK_DIR}/skyline-rollback.env"
 SKYLINE_RTT_FALLBACK_MS_DEFAULT=180
-SKYLINE_UDP_TARGETS_DEFAULT="101.94.166.1 139.226.226.2 120.204.34.85"
-SKYLINE_UDP_PORT_DEFAULT=443
-SKYLINE_UDP_PROBE_COUNT_DEFAULT=3
+SKYLINE_STUN_HOST_DEFAULT="stun.hitv.com"
+SKYLINE_STUN_TARGETS_DEFAULT="175.6.157.109 116.162.157.194 111.8.4.248"
+SKYLINE_STUN_PORT_DEFAULT=3478
+SKYLINE_STUN_PROBE_COUNT_DEFAULT=10
+SKYLINE_STUN_TIMEOUT_DEFAULT=3
+SKYLINE_STUN_INTERVAL_DEFAULT=1
 SKYLINE_CGROUP_PATH="${SKYLINE_CGROUP_PATH:-/sys/fs/cgroup/skyline-speeder}"
 TCP_OPTIMIZE_COMPLETED=0
 
@@ -549,138 +552,191 @@ skyline_clamp_int() {
   printf '%s\n' "$value"
 }
 
-skyline_install_udp_probe() {
-  command -v hping3 >/dev/null 2>&1 && return 0
-  command -v apt-get >/dev/null 2>&1 || return 1
-  info "未检测到 hping3，安装 UDP RTT 探测工具。" >&2
+skyline_install_stun_probe() {
+  local missing=()
+  command -v tcpdump >/dev/null 2>&1 || missing+=(tcpdump)
+  command -v turnutils_stunclient >/dev/null 2>&1 || missing+=(coturn)
+  command -v ip >/dev/null 2>&1 || missing+=(iproute2)
+  command -v timeout >/dev/null 2>&1 || missing+=(coreutils)
+  [ "${#missing[@]}" -eq 0 ] && return 0
+  command -v apt-get >/dev/null 2>&1 || {
+    err "缺少 STUN 探测依赖（${missing[*]}），且当前系统没有 apt-get，无法自动安装。"
+    return 1
+  }
+  mkdir -p "$(dirname "$SKYLINE_LOG_FILE")"
+  info "未检测到完整 STUN 探测依赖，自动安装 tcpdump、coturn、iproute2 和 coreutils。" >&2
   apt-get update -y >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
-  apt-get install -y hping3 >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
-  command -v hping3 >/dev/null 2>&1
+  apt-get install -y tcpdump coturn iproute2 coreutils >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
+  command -v tcpdump >/dev/null 2>&1 && command -v turnutils_stunclient >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1
 }
 
-skyline_udp_rtt_ms() {
-  local target="$1" port="${SKYLINE_UDP_PORT:-$SKYLINE_UDP_PORT_DEFAULT}"
-  local count="${SKYLINE_UDP_PROBE_COUNT:-$SKYLINE_UDP_PROBE_COUNT_DEFAULT}"
-  local output rtt_values rtt responses sent jitter
-  SKYLINE_UDP_SENT=0
-  SKYLINE_UDP_RESPONSES=0
-  SKYLINE_UDP_LOSS_PERCENT=100
-  SKYLINE_UDP_RTT_MS=""
-  SKYLINE_UDP_JITTER_MS=""
-  SKYLINE_UDP_RAW_OUTPUT=""
+skyline_stun_rtt_ms() {
+  local server_ip="$1" port="${SKYLINE_STUN_PORT:-$SKYLINE_STUN_PORT_DEFAULT}"
+  local count="${SKYLINE_STUN_PROBE_COUNT:-$SKYLINE_STUN_PROBE_COUNT_DEFAULT}"
+  local timeout_s="${SKYLINE_STUN_TIMEOUT:-$SKYLINE_STUN_TIMEOUT_DEFAULT}"
+  local interval="${SKYLINE_STUN_INTERVAL:-$SKYLINE_STUN_INTERVAL_DEFAULT}"
+  local route iface srcip cap tcpid request_ts response_ts rtt timestamps i
+  local -a rtts=()
+  SKYLINE_STUN_SENT=0
+  SKYLINE_STUN_RESPONSES=0
+  SKYLINE_STUN_LOSS_PERCENT=100
+  SKYLINE_STUN_RTT_MS=""
+  SKYLINE_STUN_MIN_RTT_MS=""
+  SKYLINE_STUN_AVG_RTT_MS=""
+  SKYLINE_STUN_MAX_RTT_MS=""
+  SKYLINE_STUN_JITTER_MS=""
+  SKYLINE_STUN_INTERFACE=""
+  SKYLINE_STUN_SOURCE_IP=""
 
-  count="$(skyline_clamp_int "$(skyline_value_or_default "$count" "$SKYLINE_UDP_PROBE_COUNT_DEFAULT")" 1 20)"
-  SKYLINE_UDP_SENT="$count"
-  output="$(timeout 12 hping3 --udp -p "$port" -c "$count" -i u200000 "$target" 2>&1 || true)"
-  SKYLINE_UDP_RAW_OUTPUT="$output"
-  rtt_values="$(printf '%s\n' "$output" | sed -nE 's/.*rtt=([0-9]+([.][0-9]+)?) ms.*/\1/p')"
-  responses="$(printf '%s\n' "$rtt_values" | sed '/^$/d' | wc -l | tr -d ' ')"
-  SKYLINE_UDP_RESPONSES="${responses:-0}"
-  if [ "$SKYLINE_UDP_SENT" -gt 0 ] 2>/dev/null; then
-    SKYLINE_UDP_LOSS_PERCENT="$(( (SKYLINE_UDP_SENT - SKYLINE_UDP_RESPONSES) * 100 / SKYLINE_UDP_SENT ))"
-  fi
-  if [ "$SKYLINE_UDP_RESPONSES" -eq 0 ] 2>/dev/null; then
-    return 1
-  fi
-  rtt="$(printf '%s\n' "$rtt_values" | sort -n | awk '{v[NR]=$1} END {
-    if (NR % 2) print v[(NR + 1) / 2]
-    else print (v[NR / 2] + v[NR / 2 + 1]) / 2
-  }')"
-  printf '%s' "$rtt" | grep -Eq '^[0-9]+([.][0-9]+)?$' || return 1
-  SKYLINE_UDP_RTT_MS="$(awk -v rtt="$rtt" 'BEGIN { printf "%d", rtt + 0.5 }')"
-  jitter="$(printf '%s\n' "$rtt_values" | awk '
+  count="$(skyline_clamp_int "$(skyline_value_or_default "$count" "$SKYLINE_STUN_PROBE_COUNT_DEFAULT")" 1 20)"
+  timeout_s="$(skyline_clamp_int "$(skyline_value_or_default "$timeout_s" "$SKYLINE_STUN_TIMEOUT_DEFAULT")" 1 15)"
+  port="$(skyline_clamp_int "$(skyline_value_or_default "$port" "$SKYLINE_STUN_PORT_DEFAULT")" 1 65535)"
+  SKYLINE_STUN_SENT="$count"
+
+  route="$(ip -4 route get "$server_ip" 2>/dev/null)" || return 1
+  iface="$(printf '%s\n' "$route" | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
+  srcip="$(printf '%s\n' "$route" | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+  [ -n "$iface" ] && [ -n "$srcip" ] || return 1
+  SKYLINE_STUN_INTERFACE="$iface"
+  SKYLINE_STUN_SOURCE_IP="$srcip"
+
+  for i in $(seq 1 "$count"); do
+    cap="$(mktemp /tmp/skyline-stun.XXXXXX)"
+    timeout "${timeout_s}s" tcpdump -l -tt -nn -i "$iface" -c 2 "host $server_ip and udp and port $port" >"$cap" 2>/dev/null &
+    tcpid=$!
+    sleep 0.2
+    timeout "${timeout_s}s" turnutils_stunclient -p "$port" "$server_ip" >/dev/null 2>&1 || true
+    wait "$tcpid" 2>/dev/null || true
+
+    timestamps="$(awk -v ip="$server_ip" -v port="$port" '
+      $0 ~ (" > " ip "\\." port ": UDP") && request == "" { request=$1 }
+      $0 ~ (ip "\\." port " > ") && response == "" { response=$1 }
+      END { print request, response }
+    ' "$cap")"
+    rm -f "$cap"
+    read -r request_ts response_ts <<< "$timestamps"
+    if [ -n "$request_ts" ] && [ -n "$response_ts" ]; then
+      rtt="$(awk -v a="$request_ts" -v b="$response_ts" 'BEGIN { printf "%.3f", (b-a)*1000 }')"
+      if awk -v r="$rtt" 'BEGIN { exit !(r >= 0 && r < 10000) }'; then
+        rtts+=("$rtt")
+        printf 'stun target=%s round=%s rtt=%sms\n' "$server_ip" "$i" "$rtt" >>"$SKYLINE_LOG_FILE"
+      else
+        printf 'stun target=%s round=%s invalid-rtt=%s\n' "$server_ip" "$i" "$rtt" >>"$SKYLINE_LOG_FILE"
+      fi
+    else
+      printf 'stun target=%s round=%s timeout\n' "$server_ip" "$i" >>"$SKYLINE_LOG_FILE"
+    fi
+    sleep "$interval"
+  done
+
+  SKYLINE_STUN_RESPONSES="${#rtts[@]}"
+  SKYLINE_STUN_LOSS_PERCENT="$(( (SKYLINE_STUN_SENT - SKYLINE_STUN_RESPONSES) * 100 / SKYLINE_STUN_SENT ))"
+  [ "$SKYLINE_STUN_RESPONSES" -gt 0 ] 2>/dev/null || return 1
+
+  # Match the standalone STUN probe summary: calculate min / average / max,
+  # then compare routes using the rounded average RTT after packet loss.
+  read -r SKYLINE_STUN_MIN_RTT_MS SKYLINE_STUN_AVG_RTT_MS SKYLINE_STUN_MAX_RTT_MS <<EOF
+$(printf '%s\n' "${rtts[@]}" | awk '
+  NR == 1 { min=$1; max=$1 }
+  { sum+=$1; if ($1 < min) min=$1; if ($1 > max) max=$1 }
+  END { printf "%.3f %.3f %.3f", min, sum/NR, max }
+')
+EOF
+  SKYLINE_STUN_RTT_MS="$(awk -v rtt="$SKYLINE_STUN_AVG_RTT_MS" 'BEGIN { printf "%d", rtt + 0.5 }')"
+  SKYLINE_STUN_JITTER_MS="$(printf '%s\n' "${rtts[@]}" | awk '
     NR == 1 { previous=$1; next }
     { delta=$1-previous; if (delta < 0) delta=-delta; total+=delta; samples++; previous=$1 }
-    END { if (samples) printf "%.0f", total/samples; else print 0 }
+    END { if (samples) printf "%.3f", total/samples; else print "0.000" }
   ')"
-  SKYLINE_UDP_JITTER_MS="${jitter:-0}"
-  return 0
 }
 
 skyline_detect_rtt_ms() {
-  local targets="${SKYLINE_UDP_TARGETS:-$SKYLINE_UDP_TARGETS_DEFAULT}"
-  local target result responses sent loss jitter fallback
-  local worst_rtt=0 worst_target="" worst_jitter=0 worst_loss=0
-  local worst_unreachable=0 responsive_targets=0
+  local host="${SKYLINE_STUN_HOST:-$SKYLINE_STUN_HOST_DEFAULT}"
+  local targets="${SKYLINE_STUN_TARGETS:-$SKYLINE_STUN_TARGETS_DEFAULT}"
+  local target result responses sent loss jitter min_rtt avg_rtt max_rtt fallback
+  local worst_rtt=0 worst_target="" worst_jitter=0 worst_loss=-1 worst_unreachable=0 responsive_targets=0
   local -a measurements=()
 
   fallback="$(skyline_clamp_int "$(skyline_value_or_default "${SKYLINE_RTT_FALLBACK_MS:-$SKYLINE_RTT_FALLBACK_MS_DEFAULT}" 180)" 50 1000)"
-  SKYLINE_UDP_MEASUREMENTS=""
-  SKYLINE_UDP_WORST_TARGET=""
-  SKYLINE_UDP_WORST_RTT_MS="$fallback"
-  SKYLINE_UDP_WORST_LOSS_PERCENT=100
-  SKYLINE_UDP_WORST_JITTER_MS=0
-  SKYLINE_UDP_ALL_UNREACHABLE=1
-  SKYLINE_UDP_TARGETS_USED="$targets"
-  SKYLINE_UDP_PORT_USED="${SKYLINE_UDP_PORT:-$SKYLINE_UDP_PORT_DEFAULT}"
-  SKYLINE_UDP_PROBE_COUNT_USED="$(skyline_clamp_int "$(skyline_value_or_default "${SKYLINE_UDP_PROBE_COUNT:-$SKYLINE_UDP_PROBE_COUNT_DEFAULT}" "$SKYLINE_UDP_PROBE_COUNT_DEFAULT")" 1 20)"
+  SKYLINE_STUN_MEASUREMENTS=""
+  SKYLINE_STUN_WORST_TARGET=""
+  SKYLINE_STUN_WORST_RTT_MS="$fallback"
+  SKYLINE_STUN_WORST_LOSS_PERCENT=100
+  SKYLINE_STUN_WORST_JITTER_MS=0
+  SKYLINE_STUN_WORST_MIN_RTT_MS=""
+  SKYLINE_STUN_WORST_AVG_RTT_MS=""
+  SKYLINE_STUN_WORST_MAX_RTT_MS=""
+  SKYLINE_STUN_ALL_UNREACHABLE=1
+  SKYLINE_STUN_HOST_USED="$host"
+  SKYLINE_STUN_TARGETS_USED="$targets"
+  SKYLINE_STUN_PORT_USED="${SKYLINE_STUN_PORT:-$SKYLINE_STUN_PORT_DEFAULT}"
+  SKYLINE_STUN_PROBE_COUNT_USED="${SKYLINE_STUN_PROBE_COUNT:-$SKYLINE_STUN_PROBE_COUNT_DEFAULT}"
+  SKYLINE_STUN_TIMEOUT_USED="${SKYLINE_STUN_TIMEOUT:-$SKYLINE_STUN_TIMEOUT_DEFAULT}"
+  SKYLINE_STUN_INTERVAL_USED="${SKYLINE_STUN_INTERVAL:-$SKYLINE_STUN_INTERVAL_DEFAULT}"
 
-  if ! skyline_install_udp_probe; then
-    warn "无法安装 hping3，跳过 UDP 443 RTT 探测；将使用保守回退值 ${fallback}ms。" >&2
-    SKYLINE_UDP_MEASUREMENTS="probe-unavailable"
-    SKYLINE_UDP_WORST_TARGET="none"
-    SKYLINE_UDP_WORST_RTT_MS="$fallback"
-    SKYLINE_UDP_WORST_LOSS_PERCENT=100
-    SKYLINE_UDP_ALL_UNREACHABLE=1
+  if ! skyline_install_stun_probe; then
+    warn "无法安装 STUN 探测依赖，使用默认 Skyline 参数档和回退 RTT ${fallback}ms。" >&2
+    SKYLINE_STUN_MEASUREMENTS="probe-unavailable"
+    SKYLINE_STUN_WORST_TARGET="none"
+    SKYLINE_STUN_ALL_UNREACHABLE=1
     SKYLINE_DETECTED_RTT_MS="$fallback"
     return 0
   fi
 
-  # These are not iperf3 servers. hping3 sends small UDP probes to port 443
-  # and records the RTT of a UDP response or ICMP port-unreachable response.
-  # An unanswered target is worse than any responsive target and is retained
-  # as the selected target; its RTT is unavailable, so the conservative
-  # fallback is used while observed RTTs still raise the baseline when larger.
   for target in $targets; do
-    if skyline_udp_rtt_ms "$target"; then
-      result="$SKYLINE_UDP_RTT_MS"
-      responses="$SKYLINE_UDP_RESPONSES"
-      sent="$SKYLINE_UDP_SENT"
-      loss="$SKYLINE_UDP_LOSS_PERCENT"
-      jitter="$SKYLINE_UDP_JITTER_MS"
-      measurements+=("$target=${result}ms(${responses}/${sent},loss=${loss}%,jitter=${jitter}ms)")
+    if skyline_stun_rtt_ms "$target"; then
+      result="$SKYLINE_STUN_RTT_MS"
+      responses="$SKYLINE_STUN_RESPONSES"
+      sent="$SKYLINE_STUN_SENT"
+      loss="$SKYLINE_STUN_LOSS_PERCENT"
+      jitter="$SKYLINE_STUN_JITTER_MS"
+      min_rtt="$SKYLINE_STUN_MIN_RTT_MS"
+      avg_rtt="$SKYLINE_STUN_AVG_RTT_MS"
+      max_rtt="$SKYLINE_STUN_MAX_RTT_MS"
+      measurements+=("$target=avg:${result}ms,min:${min_rtt}ms,avg:${avg_rtt}ms,max:${max_rtt}ms,${responses}/${sent},loss:${loss}%,jitter:${jitter}ms")
       responsive_targets=$((responsive_targets + 1))
-      SKYLINE_UDP_ALL_UNREACHABLE=0
-      if [ "$worst_unreachable" -eq 0 ] && { [ "$result" -gt "$worst_rtt" ] || [ -z "$worst_target" ]; } 2>/dev/null; then
+      SKYLINE_STUN_ALL_UNREACHABLE=0
+      if [ "$worst_unreachable" -eq 0 ] && { [ "$loss" -gt "$worst_loss" ] || { [ "$loss" -eq "$worst_loss" ] && [ "$result" -gt "$worst_rtt" ]; } || [ -z "$worst_target" ]; } 2>/dev/null; then
         worst_rtt="$result"
         worst_target="$target"
         worst_loss="$loss"
         worst_jitter="$jitter"
+        SKYLINE_STUN_WORST_MIN_RTT_MS="$min_rtt"
+        SKYLINE_STUN_WORST_AVG_RTT_MS="$avg_rtt"
+        SKYLINE_STUN_WORST_MAX_RTT_MS="$max_rtt"
       fi
     else
-      responses="${SKYLINE_UDP_RESPONSES:-0}"
-      sent="${SKYLINE_UDP_SENT:-$SKYLINE_UDP_PROBE_COUNT_USED}"
-      loss="${SKYLINE_UDP_LOSS_PERCENT:-100}"
-      measurements+=("$target=unreachable(${responses}/${sent},loss=${loss}%)")
+      responses="${SKYLINE_STUN_RESPONSES:-0}"
+      sent="${SKYLINE_STUN_SENT:-$SKYLINE_STUN_PROBE_COUNT_USED}"
+      loss="${SKYLINE_STUN_LOSS_PERCENT:-100}"
+      measurements+=("$target=unreachable(${responses}/${sent},loss:${loss}%)")
       if [ "$worst_unreachable" -eq 0 ]; then
         worst_unreachable=1
         worst_target="$target"
-        worst_loss="$loss"
+        worst_loss=100
         worst_jitter=0
+        SKYLINE_STUN_WORST_MIN_RTT_MS=""
+        SKYLINE_STUN_WORST_AVG_RTT_MS=""
+        SKYLINE_STUN_WORST_MAX_RTT_MS=""
       fi
     fi
   done
 
-  SKYLINE_UDP_MEASUREMENTS="${measurements[*]}"
-  SKYLINE_UDP_WORST_TARGET="${worst_target:-none}"
-  SKYLINE_UDP_WORST_LOSS_PERCENT="$worst_loss"
-  SKYLINE_UDP_WORST_JITTER_MS="$worst_jitter"
+  SKYLINE_STUN_MEASUREMENTS="${measurements[*]}"
+  SKYLINE_STUN_WORST_TARGET="${worst_target:-none}"
+  SKYLINE_STUN_WORST_LOSS_PERCENT="$worst_loss"
+  SKYLINE_STUN_WORST_JITTER_MS="$worst_jitter"
   if [ "$worst_unreachable" -eq 1 ]; then
     [ "$worst_rtt" -gt "$fallback" ] 2>/dev/null || worst_rtt="$fallback"
-    warn "UDP 443 目标 ${SKYLINE_UDP_WORST_TARGET} 无响应，按最差目标处理并使用保守基线 ${worst_rtt}ms。" >&2
-  elif [ -z "$worst_target" ]; then
-    worst_rtt="$fallback"
-    SKYLINE_UDP_WORST_TARGET="none"
-    SKYLINE_UDP_WORST_LOSS_PERCENT=100
-    warn "三个 UDP 443 目标均无有效响应，使用默认 Skyline 参数档和回退 RTT ${worst_rtt}ms。" >&2
   fi
   if [ "$responsive_targets" -eq 0 ] 2>/dev/null; then
-    SKYLINE_UDP_ALL_UNREACHABLE=1
+    SKYLINE_STUN_ALL_UNREACHABLE=1
     worst_rtt="$fallback"
-    SKYLINE_UDP_WORST_TARGET="none"
-    SKYLINE_UDP_WORST_LOSS_PERCENT=100
+    SKYLINE_STUN_WORST_TARGET="none"
+    SKYLINE_STUN_WORST_LOSS_PERCENT=100
+    warn "三个 STUN 目标均无有效响应，使用默认 Skyline 参数档和回退 RTT ${worst_rtt}ms。" >&2
   fi
-  SKYLINE_UDP_WORST_RTT_MS="$worst_rtt"
+  SKYLINE_STUN_WORST_RTT_MS="$worst_rtt"
   SKYLINE_DETECTED_RTT_MS="$worst_rtt"
 }
 
@@ -688,15 +744,18 @@ skyline_write_profile() {
   local bandwidth="$1" mem_mb="$2" rtt_ms="$3"
   local max_pacing max_cwnd queue_delay initial_cwnd
   local startup_gain cruise_inflight cruise_pacing loss_ratio profile_mode
-  local udp_targets udp_port udp_count udp_worst_target udp_loss udp_jitter udp_measurements
+  local stun_host stun_targets stun_port stun_count stun_timeout stun_interval stun_worst_target stun_loss stun_jitter stun_measurements
 
-  udp_targets="${SKYLINE_UDP_TARGETS_USED:-${SKYLINE_UDP_TARGETS:-$SKYLINE_UDP_TARGETS_DEFAULT}}"
-  udp_port="${SKYLINE_UDP_PORT_USED:-${SKYLINE_UDP_PORT:-$SKYLINE_UDP_PORT_DEFAULT}}"
-  udp_count="${SKYLINE_UDP_PROBE_COUNT_USED:-${SKYLINE_UDP_PROBE_COUNT:-$SKYLINE_UDP_PROBE_COUNT_DEFAULT}}"
-  udp_worst_target="${SKYLINE_UDP_WORST_TARGET:-none}"
-  udp_loss="${SKYLINE_UDP_WORST_LOSS_PERCENT:-100}"
-  udp_jitter="${SKYLINE_UDP_WORST_JITTER_MS:-0}"
-  udp_measurements="${SKYLINE_UDP_MEASUREMENTS:-unavailable}"
+  stun_host="${SKYLINE_STUN_HOST_USED:-${SKYLINE_STUN_HOST:-$SKYLINE_STUN_HOST_DEFAULT}}"
+  stun_targets="${SKYLINE_STUN_TARGETS_USED:-${SKYLINE_STUN_TARGETS:-$SKYLINE_STUN_TARGETS_DEFAULT}}"
+  stun_port="${SKYLINE_STUN_PORT_USED:-${SKYLINE_STUN_PORT:-$SKYLINE_STUN_PORT_DEFAULT}}"
+  stun_count="${SKYLINE_STUN_PROBE_COUNT_USED:-${SKYLINE_STUN_PROBE_COUNT:-$SKYLINE_STUN_PROBE_COUNT_DEFAULT}}"
+  stun_timeout="${SKYLINE_STUN_TIMEOUT_USED:-${SKYLINE_STUN_TIMEOUT:-$SKYLINE_STUN_TIMEOUT_DEFAULT}}"
+  stun_interval="${SKYLINE_STUN_INTERVAL_USED:-${SKYLINE_STUN_INTERVAL:-$SKYLINE_STUN_INTERVAL_DEFAULT}}"
+  stun_worst_target="${SKYLINE_STUN_WORST_TARGET:-none}"
+  stun_loss="${SKYLINE_STUN_WORST_LOSS_PERCENT:-100}"
+  stun_jitter="${SKYLINE_STUN_WORST_JITTER_MS:-0}"
+  stun_measurements="${SKYLINE_STUN_MEASUREMENTS:-unavailable}"
 
   # The upstream Skyline profile is tuned for random 10-20% loss and
   # 100-300ms RTT, which is the mainland-China long-haul target. Keep those
@@ -719,8 +778,8 @@ skyline_write_profile() {
   [ "$mem_mb" -lt 1024 ] 2>/dev/null && initial_cwnd=32
   profile_mode="china-mainland-random-loss"
 
-  if [ "${SKYLINE_UDP_ALL_UNREACHABLE:-0}" = "1" ]; then
-    # No UDP target answered, so there is no route evidence to justify
+  if [ "${SKYLINE_STUN_ALL_UNREACHABLE:-0}" = "1" ]; then
+    # No STUN target answered, so there is no route evidence to justify
     # bandwidth/memory-derived ceilings or a custom RTO profile. Restore the
     # values shipped by Skyline instead of tuning from an unavailable signal.
     profile_mode="default"
@@ -741,14 +800,20 @@ SKYLINE_PROFILE_NAME=$profile_mode
 SKYLINE_BANDWIDTH_MBPS=$bandwidth
 SKYLINE_MEMORY_MB=$mem_mb
 SKYLINE_RTT_MS=$rtt_ms
-SKYLINE_UDP_TARGETS=$(printf '%q' "$udp_targets")
-SKYLINE_UDP_PORT=$udp_port
-SKYLINE_UDP_PROBE_COUNT=$udp_count
-SKYLINE_UDP_WORST_TARGET=$(printf '%q' "$udp_worst_target")
-SKYLINE_UDP_WORST_RTT_MS=${SKYLINE_UDP_WORST_RTT_MS:-$rtt_ms}
-SKYLINE_UDP_WORST_LOSS_PERCENT=$udp_loss
-SKYLINE_UDP_WORST_JITTER_MS=$udp_jitter
-SKYLINE_UDP_MEASUREMENTS=$(printf '%q' "$udp_measurements")
+SKYLINE_STUN_HOST=$(printf '%q' "$stun_host")
+SKYLINE_STUN_TARGETS=$(printf '%q' "$stun_targets")
+SKYLINE_STUN_PORT=$stun_port
+SKYLINE_STUN_PROBE_COUNT=$stun_count
+SKYLINE_STUN_TIMEOUT=$stun_timeout
+SKYLINE_STUN_INTERVAL=$stun_interval
+SKYLINE_STUN_WORST_TARGET=$(printf '%q' "$stun_worst_target")
+SKYLINE_STUN_WORST_RTT_MS=${SKYLINE_STUN_WORST_RTT_MS:-$rtt_ms}
+SKYLINE_STUN_WORST_MIN_RTT_MS=${SKYLINE_STUN_WORST_MIN_RTT_MS:-unavailable}
+SKYLINE_STUN_WORST_AVG_RTT_MS=${SKYLINE_STUN_WORST_AVG_RTT_MS:-unavailable}
+SKYLINE_STUN_WORST_MAX_RTT_MS=${SKYLINE_STUN_WORST_MAX_RTT_MS:-unavailable}
+SKYLINE_STUN_WORST_LOSS_PERCENT=$stun_loss
+SKYLINE_STUN_WORST_JITTER_MS=$stun_jitter
+SKYLINE_STUN_MEASUREMENTS=$(printf '%q' "$stun_measurements")
 SKYLINE_MAX_PACING_MBPS=$max_pacing
 SKYLINE_MAX_CWND_PACKETS=$max_cwnd
 SKYLINE_MAX_QUEUE_DELAY_MS=$queue_delay
@@ -886,14 +951,14 @@ skyline_apply_auto_profile() {
   # 避免只改一个参数时意外恢复其它参数的 CLI 默认值。
   # shellcheck disable=SC1090
   . "$SKYLINE_PROFILE_FILE"
-  # If every UDP target was silent, keep Skyline's shipped defaults. In
+  # If every STUN target was silent, keep Skyline's shipped defaults. In
   # particular, do not enable a custom RACK RTO policy from an unavailable
   # measurement; the profile still records the failed probe for diagnosis.
   if [ "${SKYLINE_PROFILE_NAME:-}" = "default" ]; then
     ssctl reset-module-config >>"$SKYLINE_LOG_FILE" 2>&1
     ssctl reset-rack-rto >>"$SKYLINE_LOG_FILE" 2>&1
     ssctl status >>"$SKYLINE_LOG_FILE" 2>&1
-    success "三个 UDP 443 目标均无响应，已使用 Skyline 默认参数档（未应用自定义 RTO）。"
+    success "三个 STUN 目标均无响应，已使用 Skyline 默认参数档（未应用自定义 RTO）。"
     echo "参数档案：$SKYLINE_PROFILE_FILE"
     echo "详细日志：$SKYLINE_LOG_FILE"
     return 0
@@ -1044,9 +1109,9 @@ run_skyline_optimize() {
   skyline_detect_rtt_ms
   rtt_ms="${SKYLINE_DETECTED_RTT_MS:-$SKYLINE_RTT_FALLBACK_MS_DEFAULT}"
   skyline_write_profile "$bandwidth" "$mem_mb" "$rtt_ms"
-  printf "自动探测：带宽=%sMbps，内存=%sMB，最差 UDP 目标=%s，RTT=%sms，丢失=%s%%，抖动=%sms\n" \
-    "$bandwidth" "$mem_mb" "${SKYLINE_UDP_WORST_TARGET:-none}" "$rtt_ms" \
-    "${SKYLINE_UDP_WORST_LOSS_PERCENT:-100}" "${SKYLINE_UDP_WORST_JITTER_MS:-0}"
+  printf "自动探测：带宽=%sMbps，内存=%sMB，最差 STUN 目标=%s，RTT=%sms，丢失=%s%%，抖动=%sms\n" \
+    "$bandwidth" "$mem_mb" "${SKYLINE_STUN_WORST_TARGET:-none}" "$rtt_ms" \
+    "${SKYLINE_STUN_WORST_LOSS_PERCENT:-100}" "${SKYLINE_STUN_WORST_JITTER_MS:-0}"
 
   installer="$(mktemp /tmp/skyline-speeder-install.XXXXXX.sh)"
   if ! skyline_download_installer "$installer" >>"$SKYLINE_LOG_FILE" 2>&1; then

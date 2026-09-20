@@ -8,12 +8,11 @@
 - Skyline 阶段使用 `--prebuilt` 预编译 release，不在目标机安装 clang、LLVM 或 Rust 编译工具链。
 - Skyline 安装前检查 `bpftool` 和 `tcp_cubic`；缺失 `bpftool` 时自动安装 `linux-tools-common`、`linux-tools-generic`，无法加载或验证 `cubic` 时终止。
 - 根据内存、上传带宽和基线 RTT 自动生成并应用 Skyline 模块与 RACK RTO 参数，保存参数档案和独立日志。
-- Skyline 自动调参改为面向中国大陆方向长 RTT / 随机丢包链路：使用 UDP 443 探针的最差目标作为路径基线，不再探测 `1.1.1.1` Cloudflare 边缘 RTT。
-- 调参基线对齐 Skyline 官方生产档：固定 `startup/cruise/guardrail/loss` 系数，使用 20ms/200ms RTO 下限边界和 3x/6x RTO 退避上限。
-- Skyline RTT 基线改为直接探测 `101.94.166.1:443`、`139.226.226.2:443`、`120.204.34.85:443` 的 UDP 小包，记录 RTT、响应率和抖动并取最差目标；不再使用 ICMP ping。
-- 明确上述地址不是 iperf3 服务器：带宽继续使用 Ookla 或手动值，UDP 探针仅作为路径 RTT/可达性辅助信号，不能伪装成固定速率 UDP 吞吐或丢包测试。
-- 三个 UDP 目标均无响应时使用默认 Skyline 参数档和保守 RTT 回退值；无响应目标不会从最差目标判断中被忽略。
-- 增加 `SKYLINE_UDP_TARGETS`、`SKYLINE_UDP_PORT`、`SKYLINE_UDP_PROBE_COUNT` 探测参数及 profile 明细记录。
+- Skyline 自动调参改为面向中国大陆方向长 RTT / 随机丢包链路：使用 `stun.hitv.com:3478` 的指定三网 IP STUN 实测结果作为路径基线。
+- STUN 默认直接测试 `175.6.157.109:3478`、`116.162.157.194:3478`、`111.8.4.248:3478`，记录真实请求/响应 RTT、响应率、丢失率和抖动，按丢失率优先、RTT 次之取最差目标。
+- 缺少 `tcpdump`、`turnutils_stunclient`、`ip` 或 `timeout` 时自动安装 `tcpdump`、`coturn`、`iproute2`、`coreutils`；不再使用 `hping3` 或 ICMP ping 推断 RTT。
+- 三个 STUN 目标均无响应时重置到 Skyline 默认模块与 RTO 参数档，避免从不可观测数据生成自定义优化参数。
+- 增加 `SKYLINE_STUN_HOST`、`SKYLINE_STUN_TARGETS`、`SKYLINE_STUN_PORT`、`SKYLINE_STUN_PROBE_COUNT`、`SKYLINE_STUN_TIMEOUT`、`SKYLINE_STUN_INTERVAL` 及 profile 探测明细记录。
 
 ### Documentation
 - README 增加 Skyline Speeder 中国大陆方向 RTT 探测、官方参数基线、动态 RTO cgroup 作用域、DSCP 安全边界、回滚说明和环境变量说明。
