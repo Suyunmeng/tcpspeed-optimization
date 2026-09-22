@@ -174,7 +174,7 @@ TCP 子菜单包含：
 1. 查看 TCP / BBR / 内核状态
 2. 执行 TCP 优化
 3. TCP 优化 + Skyline Speeder 后置优化
-4. 单独安装 / 自动配置 Skyline Speeder
+4. 单独安装 / 手动选择 Skyline 配置
 5. 查看 Skyline Speeder 状态
 6. 重启后继续安装
 7. 回滚 Skyline Speeder 特殊优化
@@ -194,8 +194,8 @@ speed --update-self    # 更新 speed 自身
 speed --all            # 完整流程：TCP 调优 + Argo 节点
 speed --force-all      # 等同 speed --all
 speed --tcp            # 单独执行 TCP 调优
-speed --tcp-skyline    # 执行已有 TCP 调优，然后安装并自动配置 Skyline Speeder
-speed --skyline        # 仅安装并自动配置 Skyline Speeder（免编译工具链）
+speed --tcp-skyline    # 执行已有 TCP 调优，然后安装并手动选择 Skyline 配置
+speed --skyline        # 仅安装并手动选择 Skyline 配置（免编译工具链）
 speed --skyline-status # 查看 Skyline Speeder 运行状态
 speed --skyline-rollback # 卸载 Skyline 并回滚特殊优化配置
 speed --optimize       # 等同 speed --tcp
@@ -235,13 +235,12 @@ speed --tcp-skyline
 2. 检查 `bpftool`；如果缺失，执行 `apt install -y linux-tools-common linux-tools-generic`（前置步骤会先刷新 APT 索引），安装后仍找不到命令则终止。
 3. 执行 `modprobe tcp_cubic`，确认内核的可用拥塞控制列表包含 `cubic`；模块无法加载或内核没有 `cubic` 时立即失败，不继续安装 Skyline。
 4. 将 `tcp_cubic` 写入 `/etc/modules-load.d/99-speed-slayer-cubic.conf`，确保重启后仍可加载，并记录本次变更。
-5. 下载 Skyline Speeder 的 `install.sh` 并调用 `--prebuilt`，只安装预编译 release，不安装 clang、LLVM 或 Rust 编译工具链。
-6. 以 `stun.hitv.com:3478` 的 STUN 协议向三个指定 IP 发起探测：`175.6.157.109`、`116.162.157.194`、`111.8.4.248`。脚本由 `turnutils_stunclient` 发送真实 STUN UDP 请求，并用 `tcpdump` 在实际出站网卡上记录请求/响应时间戳。
-7. 每个 IP 记录最小/平均/最大 RTT、响应率、丢失率和抖动；按丢失率优先、平均 RTT 次之选择三个 IP 中最差的目标作为调参基线。无响应目标按最差情况处理。
-8. 三个 IP 均无有效 STUN 响应时，恢复 Skyline 默认模块参数与默认 RTO，不根据不可观测网络数据激进调参；`SKYLINE_RTT_FALLBACK_MS` 仅用于档案和诊断中的保守基线值。
-9. 使用 Skyline 官方针对随机 10%-20% 丢包、100-300ms RTT 的参数基线：`startup_gain=3.0`、`cruise_inflight_gain=2.0`、`cruise_pacing_gain=1.1`、`guardrail_gain=0.8`、`loss_inflation_max_ratio=0.5`、`max_queue_delay_ms=100`、`initial_cwnd_packets=100`。
-10. 根据 Ookla 上传测速或 `SPEED_BANDWIDTH_MBPS` 手动值调整硬上限（pacing 上限至少 1200Mbps，最高 10000Mbps；cwnd 默认 50000 包，小内存机器降低上限），并显式全量写入所有 Skyline 模块参数。
-11. 通过 `ssctl set-rack-rto` 应用官方 RTO 参数：下限 `floor_us=20000`、上限 `ceiling_us=200000`、普通退避倍数 3 倍、拥塞证据下 6 倍；再输出 `ssctl status`。
+5. 使用 `stun.hitv.com:3478` 的 STUN 协议探测三个指定 IP，输出每个目标的 Sent、Received、Packet loss、Min RTT、Avg RTT、Max RTT 和 Jitter。RTT 统计沿用参考脚本的 `success/sum/min/max/avg/loss` 逻辑；丢包率优先、平均 RTT 次之选择最差目标。
+6. 依次让你选择 Skyline 官方 `docs/usage.md` 中的三档参数：保守档、默认档、激进档。RTT 只作为链路信息展示和选择参考，不再根据 RTT、带宽或内存自动生成参数。
+7. 选择档位后，再选择直接使用档位默认值，或只调整 `guardrail-gain`、只调整 `cruise-pacing-gain`、同时调整两者。`guardrail-gain` 校验范围为 `0-1.0`，`cruise-pacing-gain` 校验范围为不小于 `1.0`。
+8. 应用前显示最终完整参数并要求确认。`ssctl set-module-config` 是全量覆盖接口，因此只要不是“默认档且未修改 gain”，就会一次性写入完整的 14 个档位参数；默认档且未修改 gain 时调用 `ssctl reset-module-config`。
+9. 下载 Skyline Speeder 的 `install.sh` 并调用 `--prebuilt`，只安装预编译 release，不安装 clang、LLVM 或 Rust 编译工具链。
+10. 应用用户确认的模块参数，然后执行 `ssctl reset-rack-rto`，不再自动创建自定义 RACK RTO 策略，最后输出 `ssctl status`。
 
 STUN RTT 探测默认使用 `stun.hitv.com:3478`，但会直接连接以下指定 IP，避免 DNS 结果变动影响三网比较：
 
@@ -249,7 +248,7 @@ STUN RTT 探测默认使用 `stun.hitv.com:3478`，但会直接连接以下指�
 - `116.162.157.194:3478`
 - `111.8.4.248:3478`
 
-该阶段会自动安装缺失依赖：`tcpdump`、`coturn`（提供 `turnutils_stunclient`）、`iproute2` 和 `coreutils`。STUN 请求和响应是真实 UDP 应用层往返，和 `hping3` 仅依靠 UDP/ICMP 报文的推断不同；它仍不是 iperf3 固定速率 UDP 打流，因此上传带宽继续使用 Ookla 或手动值。
+该阶段会自动安装缺失依赖：`tcpdump`、`coturn`（提供 `turnutils_stunclient`）、`iproute2` 和 `coreutils`。STUN 请求和响应是真实 UDP 应用层往返，和 `hping3` 仅依靠 UDP/ICMP 报文的推断不同；它仍不是 iperf3 固定速率 UDP 打流，因此 RTT 不代表上传带宽，也不会被脚本用于自动选择参数档。
 
 可指定探测参数：
 
@@ -261,11 +260,11 @@ SKYLINE_STUN_TIMEOUT=3 SKYLINE_STUN_INTERVAL=1 speed --skyline
 SKYLINE_RTT_FALLBACK_MS=180 speed --skyline
 ```
 
-探测明细会写入 `skyline-profile.env` 和 `skyline-optimize.log`；无响应目标会按最差情况记录，不会被忽略。
+探测明细会写入 `skyline-profile.env` 和 `skyline-optimize.log`；无响应目标会按最差情况记录，不会被忽略。三个目标均无有效响应时仍使用回退 RTT 展示，并由你选择参数档，不会自动激进调参。
 
 要求：Skyline Speeder 当前要求 Debian / Ubuntu、Linux 6.12+、`/sys/kernel/btf/vmlinux` 和 cgroup v2。该流程面向中国大陆方向的长 RTT、带宽充足、存在非拥塞性随机丢包的发送端链路；它不会改变 BGP、出口线路或客户端路由，只优化服务器发送端 TCP。预编译 release 不代表绕过内核要求；不满足条件时脚本会在安装前退出，不会改动 Skyline 配置。缺少 `bpftool` 时只安装系统工具包，不安装编译工具链。
 
-动态 RTO 只对 `/sys/fs/cgroup/skyline-speeder` 中新建的连接生效。Skyline 的 `skyline_cc` 主体仍是全局新连接策略；如果要让某个服务获得动态 RTO，需要用 Skyline 提供的包装器启动：
+当前 Speed Slayer 流程不会自动创建自定义 RACK RTO 策略；应用手动档位后会恢复 Skyline 默认 RTO。若你在 Skyline 中另行启用动态 RTO，它只对 `/sys/fs/cgroup/skyline-speeder` 中新建的连接生效。Skyline 的 `skyline_cc` 主体仍是全局新连接策略；如果要让某个服务获得动态 RTO，需要用 Skyline 提供的包装器启动：
 
 ```bash
 sudo /opt/skyline-speeder/infra/run-in-skyline-cgroup.sh <服务启动命令...>
@@ -281,11 +280,10 @@ speed --skyline-rollback
 
 回滚会调用 Skyline 官方 `--uninstall`，停止并删除 Skyline 服务、程序与 BPF 对象，并恢复 Skyline 记录的安装前拥塞控制和队列配置。Speed Slayer 只删除本次新增的 `tcp_cubic` 持久化记录，不强制卸载正在使用的内核模块；`bpftool` 属于系统工具，回滚时会保留。回滚前会要求确认，回滚失败时会保留记录和日志，便于重试。
 
-详细日志：`/etc/vps-argo-vmess/skyline-optimize.log`；自动参数档案：`/etc/vps-argo-vmess/skyline-profile.env`；回滚记录：`/etc/vps-argo-vmess/skyline-rollback.env`。可使用 `speed --skyline-status` 或 `speed --logs skyline` 查看状态。
+详细日志：`/etc/vps-argo-vmess/skyline-optimize.log`；手动选择后的参数档案：`/etc/vps-argo-vmess/skyline-profile.env`；回滚记录：`/etc/vps-argo-vmess/skyline-rollback.env`。可使用 `speed --skyline-status` 或 `speed --logs skyline` 查看状态。
 
 可选环境变量：
 
-- `SPEED_BANDWIDTH_MBPS=500`：跳过测速，直接指定上传带宽。
 - `SKYLINE_REPO=owner/repo`：指定 Skyline Speeder release 仓库。
 - `SKYLINE_RELEASE=vX.Y.Z`：锁定具体 Skyline release。
 - `SKYLINE_ARTIFACT_URL=/path/to/artifact.tar.gz`：沿用 Skyline 安装器的本地预编译包能力。

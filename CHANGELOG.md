@@ -7,11 +7,12 @@
 - 新增 `speed --skyline` / `speed --skyline-status` / `speed --skyline-rollback` 及 TCP 子菜单入口。
 - Skyline 阶段使用 `--prebuilt` 预编译 release，不在目标机安装 clang、LLVM 或 Rust 编译工具链。
 - Skyline 安装前检查 `bpftool` 和 `tcp_cubic`；缺失 `bpftool` 时自动安装 `linux-tools-common`、`linux-tools-generic`，无法加载或验证 `cubic` 时终止。
-- 根据内存、上传带宽和基线 RTT 自动生成并应用 Skyline 模块与 RACK RTO 参数，保存参数档案和独立日志。
-- Skyline 自动调参改为面向中国大陆方向长 RTT / 随机丢包链路：使用 `stun.hitv.com:3478` 的指定三网 IP STUN 实测结果作为路径基线。
+- 取消 Skyline 模块和 RACK RTO 的自动调参；保留 STUN RTT 探测，并在探测完成后让用户选择参数档。
+- 增加 usage.md 保守 / 默认 / 激进三档交互选项，以及只调整 `guardrail-gain`、只调整 `cruise-pacing-gain` 或同时调整两者的选项；应用前完整覆盖模块参数。
+- Skyline RTT 探测面向中国大陆方向长 RTT / 随机丢包链路：使用 `stun.hitv.com:3478` 的指定三网 IP STUN 实测结果供用户选择档位参考。
 - STUN 默认直接测试 `175.6.157.109:3478`、`116.162.157.194:3478`、`111.8.4.248:3478`，记录真实请求/响应 RTT、响应率、丢失率和抖动，按丢失率优先、RTT 次之取最差目标。
 - 缺少 `tcpdump`、`turnutils_stunclient`、`ip` 或 `timeout` 时自动安装 `tcpdump`、`coturn`、`iproute2`、`coreutils`；不再使用 `hping3` 或 ICMP ping 推断 RTT。
-- 三个 STUN 目标均无响应时重置到 Skyline 默认模块与 RTO 参数档，避免从不可观测数据生成自定义优化参数。
+- 三个 STUN 目标均无响应时记录回退 RTT 并交由用户选择；默认档未修改 gain 时使用 `reset-module-config`，不自动设置自定义 RTO。
 - 增加 `SKYLINE_STUN_HOST`、`SKYLINE_STUN_TARGETS`、`SKYLINE_STUN_PORT`、`SKYLINE_STUN_PROBE_COUNT`、`SKYLINE_STUN_TIMEOUT`、`SKYLINE_STUN_INTERVAL` 及 profile 探测明细记录。
 
 ### Documentation
