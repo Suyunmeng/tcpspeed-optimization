@@ -236,11 +236,12 @@ speed --tcp-skyline
 3. 执行 `modprobe tcp_cubic`，确认内核的可用拥塞控制列表包含 `cubic`；模块无法加载或内核没有 `cubic` 时立即失败，不继续安装 Skyline。
 4. 将 `tcp_cubic` 写入 `/etc/modules-load.d/99-speed-slayer-cubic.conf`，确保重启后仍可加载，并记录本次变更。
 5. 使用 `stun.hitv.com:3478` 的 STUN 协议探测三个指定 IP，输出每个目标的 Sent、Received、Packet loss、Min RTT、Avg RTT、Max RTT 和 Jitter。RTT 统计沿用参考脚本的 `success/sum/min/max/avg/loss` 逻辑；丢包率优先、平均 RTT 次之选择最差目标。
-6. 依次让你选择 Skyline 官方 `docs/usage.md` 中的三档参数：保守档、默认档、激进档。RTT 只作为链路信息展示和选择参考，不再根据 RTT、带宽或内存自动生成参数。
+6. 依次让你选择 Skyline 官方 `docs/usage.md` 中的四档参数：保守档、默认档、激进档、旧默认档（高随机丢包链路）。RTT 只作为链路信息展示和选择参考，不根据 RTT 自动选择档位。
 7. 选择档位后，再选择直接使用档位默认值，或只调整 `guardrail-gain`、只调整 `cruise-pacing-gain`、同时调整两者。`guardrail-gain` 校验范围为 `0-1.0`，`cruise-pacing-gain` 校验范围为不小于 `1.0`。
-8. 应用前显示最终完整参数并要求确认。`ssctl set-module-config` 是全量覆盖接口，因此只要不是“默认档且未修改 gain”，就会一次性写入完整的 14 个档位参数；默认档且未修改 gain 时调用 `ssctl reset-module-config`。
-9. 下载 Skyline Speeder 的 `install.sh` 并调用 `--prebuilt`，只安装预编译 release，不安装 clang、LLVM 或 Rust 编译工具链。
-10. 应用用户确认的模块参数，然后执行 `ssctl reset-rack-rto`，不再自动创建自定义 RACK RTO 策略，最后输出 `ssctl status`。
+8. 仅在 Skyline 安装流程内选择 `max-pacing-mbps` 带宽来源：自动进行 Ookla Upload 测速，或跳过测速并手动填写上行带宽。`SPEED_BANDWIDTH_MBPS` 可直接指定带宽并跳过该询问。计算会为所选档位的 startup / cruise 增益、丢包补偿和测量波动预留空间；该值是每条连接的速率硬上限，不是整机总限速。
+9. 应用前显示最终完整参数并要求确认。`ssctl set-module-config` 是全量覆盖接口，因此总是一次性写入所选档位的全部 15 个模块参数（包括 `min-cwnd-packets`）和动态 `max-pacing-mbps`，不使用 `reset-module-config`，避免升级机器的旧配置文件影响“默认档”。
+10. 下载 Skyline Speeder 的 `install.sh` 并显式调用 `--prebuilt`：新版安装器默认源码编译，Speed Slayer 为免装 clang、LLVM、Rust 而选择预编译包；支持 `SKYLINE_RELEASE` 锁定版本和 `SKYLINE_ARTIFACT_URL` 指定本地/镜像包。安装器会校验可用的 SHA256；上游没有摘要时会提示仅依赖 TLS 信任。
+11. 应用用户确认的模块参数，然后执行 `ssctl reset-rack-rto`，不再自动创建自定义 RACK RTO 策略，最后输出 `ssctl status`。
 
 STUN RTT 探测默认使用 `stun.hitv.com:3478`，但会直接连接以下指定 IP，避免 DNS 结果变动影响三网比较：
 
@@ -248,7 +249,16 @@ STUN RTT 探测默认使用 `stun.hitv.com:3478`，但会直接连接以下指�
 - `116.162.157.194:3478`
 - `111.8.4.248:3478`
 
-该阶段会自动安装缺失依赖：`tcpdump`、`coturn`（提供 `turnutils_stunclient`）、`iproute2` 和 `coreutils`。STUN 请求和响应是真实 UDP 应用层往返，和 `hping3` 仅依靠 UDP/ICMP 报文的推断不同；它仍不是 iperf3 固定速率 UDP 打流，因此 RTT 不代表上传带宽，也不会被脚本用于自动选择参数档。
+该阶段会自动安装缺失依赖：`tcpdump`、`coturn`（提供 `turnutils_stunclient`）、`iproute2` 和 `coreutils`。STUN 请求和响应是真实 UDP 应用层往返，和 `hping3` 仅依靠 UDP/ICMP 报文的推断不同；它仍不是 iperf3 固定速率 UDP 打流，因此 RTT 不代表上传带宽，也不会被脚本用于自动选择参数档。Skyline 安装时会单独询问带宽来源（除非显式设置 `SPEED_BANDWIDTH_MBPS`），可选 Ookla Upload 测速或手动输入；这个选项不会出现在其他测速流程中。
+
+动态 `max-pacing-mbps` 的计算形式为：
+
+```text
+ceil(上行 Mbps × max(startup-gain, cruise-pacing-gain)
+     × min(2, 1/(1-loss-inflation-max-ratio)) × 1.10)
+```
+
+最终值限制在 `1-100000Mbps`，只用于避免硬上限过小或异常过大；低带宽机器不会被强制设为固定的 `1200Mbps`。由于 `max-pacing-mbps` 是每条连接的硬上限，脚本会让它高于所选档位的预期 pacing 速率，避免硬上限反过来限制档位。
 
 可指定探测参数：
 
@@ -284,6 +294,8 @@ speed --skyline-rollback
 
 可选环境变量：
 
+- `SPEED_BANDWIDTH_MBPS=500`：直接指定 Skyline 动态 pacing 使用的上行带宽，不测速也不显示带宽来源选项。
+- `SPEED_AUTO_SPEEDTEST=0`：在 Skyline 带宽来源选项中默认选择手动输入，并关闭现有自动测速路径。
 - `SKYLINE_REPO=owner/repo`：指定 Skyline Speeder release 仓库。
 - `SKYLINE_RELEASE=vX.Y.Z`：锁定具体 Skyline release。
 - `SKYLINE_ARTIFACT_URL=/path/to/artifact.tar.gz`：沿用 Skyline 安装器的本地预编译包能力。

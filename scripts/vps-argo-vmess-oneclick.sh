@@ -28,7 +28,7 @@ DEFAULT_NODE_NAME="Speed-Slayer"
 
 # Skyline Speeder 后置优化：始终走 --prebuilt，不安装 clang/LLVM/Rust 编译工具链；运行前按需安装 bpftool。
 SKYLINE_REPO_DEFAULT="CYBERVERSE-Research/skyline-speeder"
-SKYLINE_INSTALLER_URL="${SKYLINE_INSTALLER_URL:-https://raw.githubusercontent.com/CYBERVERSE-Research/skyline-speeder/main/install.sh}"
+SKYLINE_INSTALLER_URL="${SKYLINE_INSTALLER_URL:-https://raw.githubusercontent.com/CYBERVERSE-Research/skyline-speeder/7a2924b76b482ec162a808b535a011ed5504f58f/install.sh}"
 SKYLINE_LOG_FILE="${WORK_DIR}/skyline-optimize.log"
 SKYLINE_PROFILE_FILE="${WORK_DIR}/skyline-profile.env"
 SKYLINE_ROLLBACK_FILE="${WORK_DIR}/skyline-rollback.env"
@@ -745,30 +745,127 @@ skyline_detect_rtt_ms() {
   SKYLINE_DETECTED_RTT_MS="$worst_rtt"
 }
 
+skyline_manual_bandwidth_prompt() {
+  local answer
+  if [ ! -t 0 ]; then
+    printf '1000\n'
+    return 0
+  fi
+  while :; do
+    printf '请输入 VPS 实际上行带宽 Mbps（1-100000）: ' >&2
+    read -r answer || answer=""
+    if printf '%s' "$answer" | grep -Eq '^[0-9]+$' && [ "$answer" -ge 1 ] && [ "$answer" -le 100000 ]; then
+      printf '%s\n' "$answer"
+      return 0
+    fi
+    warn "请输入 1 到 100000 之间的整数 Mbps。" >&2
+  done
+}
+
+skyline_select_bandwidth_mode() {
+  [ -n "${SPEED_BANDWIDTH_MBPS:-}" ] && return 0
+  SKYLINE_BANDWIDTH_MODE=auto
+  [ -t 0 ] || return 0
+  local choice=1 answer
+  if [ "${SPEED_AUTO_SPEEDTEST:-1}" = "0" ]; then
+    choice=2
+  fi
+  echo
+  echo "请选择 Skyline max-pacing 带宽来源："
+  echo "  1. 自动 Ookla Upload 测速"
+  echo "  2. 手动填写 VPS 上行带宽（跳过测速）"
+  printf '选择 [1-2，默认 %s]: ' "$choice"
+  read -r answer || answer=""
+  choice="${answer:-$choice}"
+  case "$choice" in
+    2) SKYLINE_BANDWIDTH_MODE=manual ;;
+    *) SKYLINE_BANDWIDTH_MODE=auto ;;
+  esac
+  if [ "$SKYLINE_BANDWIDTH_MODE" = manual ]; then
+    SKYLINE_SELECTED_MANUAL_BANDWIDTH="$(skyline_manual_bandwidth_prompt)"
+    SPEED_BANDWIDTH_MBPS="$SKYLINE_SELECTED_MANUAL_BANDWIDTH"
+  fi
+}
+
+skyline_detect_pacing_mbps() {
+  local bandwidth measured pacing_gain loss_ratio compensation pacing
+  # max-pacing-mbps is a per-connection hard ceiling, not a host-wide rate.
+  # Measure the host's upload capacity first; the selected profile is applied
+  # below, so the final ceiling is calculated after its gains are known.
+  if [ -n "${SPEED_BANDWIDTH_MBPS:-}" ] && printf '%s' "$SPEED_BANDWIDTH_MBPS" | grep -Eq '^[0-9]+$'; then
+    bandwidth="$SPEED_BANDWIDTH_MBPS"
+    SKYLINE_BANDWIDTH_SOURCE=manual
+  elif [ "${SKYLINE_BANDWIDTH_MODE:-auto}" = "manual" ]; then
+    bandwidth="$(skyline_manual_bandwidth_prompt)"
+    SKYLINE_BANDWIDTH_SOURCE=manual
+  elif [ "${SPEED_AUTO_SPEEDTEST:-1}" = "1" ] && ! is_nat_network && measured="$(speedtest_bandwidth_mbps 2>/dev/null)" && [ -n "$measured" ]; then
+    bandwidth="$measured"
+    SKYLINE_BANDWIDTH_SOURCE=measured
+    info "Skyline 上行带宽实测：${bandwidth}Mbps${SPEEDTEST_SERVER:+ · $SPEEDTEST_SERVER}"
+  else
+    bandwidth=""
+    SKYLINE_BANDWIDTH_SOURCE=manual
+  fi
+  if [ -z "$bandwidth" ]; then
+    if [ -t 0 ]; then
+      bandwidth="$(manual_bandwidth_prompt)"
+    else
+      bandwidth=1000
+      SKYLINE_BANDWIDTH_SOURCE=default
+      info "无法获取上行带宽，非交互模式使用 ${bandwidth}Mbps 基线；可用 SPEED_BANDWIDTH_MBPS 覆盖。"
+    fi
+  fi
+  bandwidth="$(skyline_clamp_int "$(skyline_value_or_default "$bandwidth" 1000)" 1 100000)"
+  SKYLINE_BANDWIDTH_MBPS="$bandwidth"
+  SKYLINE_MEMORY_MB="$(detect_memory_mb 2>/dev/null || true)"
+  SKYLINE_MEMORY_MB="$(skyline_value_or_default "$SKYLINE_MEMORY_MB" unknown)"
+
+  pacing_gain="$(awk -v cruise="$SKYLINE_CRUISE_PACING_GAIN" -v startup="$SKYLINE_STARTUP_GAIN" \
+    'BEGIN { if (cruise > startup) printf "%.6f", cruise; else printf "%.6f", startup }')"
+  loss_ratio="$SKYLINE_LOSS_INFLATION_MAX_RATIO"
+  compensation="$(awk -v loss="$loss_ratio" 'BEGIN { if (loss >= 0.5) print "2.0"; else printf "%.6f", 1 / (1 - loss) }')"
+  # Add 10% headroom so rounding and a small measured-bandwidth variation do
+  # not make the cap the active limiter. The result remains bounded to a
+  # practical per-flow value; low-bandwidth hosts are not forced to 1200Mbps.
+  pacing="$(awk -v bw="$bandwidth" -v gain="$pacing_gain" -v comp="$compensation" \
+    'BEGIN { value = bw * gain * comp * 1.10; printf "%d", value + 0.999999 }')"
+  pacing="$(skyline_clamp_int "$pacing" 1 100000)"
+  SKYLINE_MAX_PACING_MBPS="$pacing"
+  SKYLINE_PACING_GAIN_FOR_CAP="$pacing_gain"
+  SKYLINE_LOSS_COMPENSATION_FOR_CAP="$compensation"
+}
+
 skyline_set_profile_defaults() {
   local profile="$1"
   case "$profile" in
     conservative)
-      SKYLINE_MAX_PACING_MBPS=1200; SKYLINE_MAX_CWND_PACKETS=50000
-      SKYLINE_MAX_QUEUE_DELAY_MS=50; SKYLINE_MAX_QUEUE_DELAY_RATIO=1.0
-      SKYLINE_INITIAL_CWND_PACKETS=50; SKYLINE_MIN_RTT_WINDOW_S=10; SKYLINE_BW_WINDOW_RTTS=10
+      SKYLINE_MAX_CWND_PACKETS=50000
+      SKYLINE_MAX_QUEUE_DELAY_MS=50; SKYLINE_MAX_QUEUE_DELAY_RATIO=0.5
+      SKYLINE_INITIAL_CWND_PACKETS=50; SKYLINE_MIN_CWND_PACKETS=4; SKYLINE_MIN_RTT_WINDOW_S=30; SKYLINE_BW_WINDOW_RTTS=6
       SKYLINE_STARTUP_PLATEAU_RTTS=3; SKYLINE_STARTUP_GROWTH_RATIO=0.25; SKYLINE_STARTUP_GAIN=2.0
       SKYLINE_CRUISE_INFLIGHT_GAIN=1.5; SKYLINE_CRUISE_PACING_GAIN=1.05; SKYLINE_GUARDRAIL_GAIN=0.7
-      SKYLINE_LOSS_INFLATION_MAX_RATIO=0.5 ;;
+      SKYLINE_LOSS_INFLATION_MAX_RATIO=0.10 ;;
     aggressive)
-      SKYLINE_MAX_PACING_MBPS=2000; SKYLINE_MAX_CWND_PACKETS=100000
+      SKYLINE_MAX_CWND_PACKETS=100000
       SKYLINE_MAX_QUEUE_DELAY_MS=200; SKYLINE_MAX_QUEUE_DELAY_RATIO=2.0
-      SKYLINE_INITIAL_CWND_PACKETS=200; SKYLINE_MIN_RTT_WINDOW_S=30; SKYLINE_BW_WINDOW_RTTS=10
+      SKYLINE_INITIAL_CWND_PACKETS=200; SKYLINE_MIN_CWND_PACKETS=4; SKYLINE_MIN_RTT_WINDOW_S=30; SKYLINE_BW_WINDOW_RTTS=10
       SKYLINE_STARTUP_PLATEAU_RTTS=5; SKYLINE_STARTUP_GROWTH_RATIO=0.15; SKYLINE_STARTUP_GAIN=4.0
       SKYLINE_CRUISE_INFLIGHT_GAIN=3.0; SKYLINE_CRUISE_PACING_GAIN=1.3; SKYLINE_GUARDRAIL_GAIN=1.0
       SKYLINE_LOSS_INFLATION_MAX_RATIO=0.5 ;;
-    *)
-      SKYLINE_MAX_PACING_MBPS=1200; SKYLINE_MAX_CWND_PACKETS=50000
+    legacy)
+      SKYLINE_MAX_CWND_PACKETS=50000
       SKYLINE_MAX_QUEUE_DELAY_MS=100; SKYLINE_MAX_QUEUE_DELAY_RATIO=1.0
-      SKYLINE_INITIAL_CWND_PACKETS=100; SKYLINE_MIN_RTT_WINDOW_S=10; SKYLINE_BW_WINDOW_RTTS=10
+      SKYLINE_INITIAL_CWND_PACKETS=100; SKYLINE_MIN_CWND_PACKETS=4; SKYLINE_MIN_RTT_WINDOW_S=10; SKYLINE_BW_WINDOW_RTTS=10
       SKYLINE_STARTUP_PLATEAU_RTTS=3; SKYLINE_STARTUP_GROWTH_RATIO=0.25; SKYLINE_STARTUP_GAIN=3.0
       SKYLINE_CRUISE_INFLIGHT_GAIN=2.0; SKYLINE_CRUISE_PACING_GAIN=1.1; SKYLINE_GUARDRAIL_GAIN=0.8
       SKYLINE_LOSS_INFLATION_MAX_RATIO=0.5 ;;
+    *)
+      SKYLINE_MAX_CWND_PACKETS=50000
+      SKYLINE_MAX_QUEUE_DELAY_MS=70; SKYLINE_MAX_QUEUE_DELAY_RATIO=0.6
+      SKYLINE_INITIAL_CWND_PACKETS=100; SKYLINE_MIN_CWND_PACKETS=4; SKYLINE_MIN_RTT_WINDOW_S=30; SKYLINE_BW_WINDOW_RTTS=6
+      SKYLINE_STARTUP_PLATEAU_RTTS=5; SKYLINE_STARTUP_GROWTH_RATIO=0.20; SKYLINE_STARTUP_GAIN=3.0
+      SKYLINE_CRUISE_INFLIGHT_GAIN=3.0; SKYLINE_CRUISE_PACING_GAIN=1.25; SKYLINE_GUARDRAIL_GAIN=0.8
+      SKYLINE_LOSS_INFLATION_MAX_RATIO=0.10 ;;
   esac
 }
 
@@ -800,10 +897,11 @@ skyline_select_manual_profile() {
   if [ -t 0 ]; then
     echo
     echo "请选择 Skyline Speeder 参数档（来自 skyline-speeder/docs/usage.md）："
-    echo "  1. 保守档：低延迟优先（qdelay 50ms，startup 2.0，pacing 1.05，guardrail 0.7）"
-    echo "  2. 默认档：出厂设置（qdelay 100ms，startup 3.0，pacing 1.1，guardrail 0.8）"
-    echo "  3. 激进档：吞吐优先（qdelay 200ms，startup 4.0，pacing 1.3，guardrail 1.0）"
-    printf '选择档位 [1-3，默认 2]: '
+    echo "  1. 保守档：低延迟优先（qdelay 50ms，pacing 1.05，guardrail 0.7）"
+    echo "  2. 默认档：当前配置默认值（qdelay 70ms，pacing 1.25，guardrail 0.8）"
+    echo "  3. 激进档：吞吐优先（qdelay 200ms，pacing 1.3，guardrail 1.0）"
+    echo "  4. 旧默认档：高随机丢包链路（qdelay 100ms，pacing 1.1，loss compensation 0.5）"
+    printf '选择档位 [1-4，默认 2]: '
     read -r choice || choice="2"
   else
     info "非交互模式：RTT 仅用于展示，使用默认档；不会自动改档。"
@@ -811,6 +909,7 @@ skyline_select_manual_profile() {
   case "${choice:-2}" in
     1) SKYLINE_SELECTED_PROFILE=conservative ;;
     3) SKYLINE_SELECTED_PROFILE=aggressive ;;
+    4) SKYLINE_SELECTED_PROFILE=legacy ;;
     *) SKYLINE_SELECTED_PROFILE=default ;;
   esac
   skyline_set_profile_defaults "$SKYLINE_SELECTED_PROFILE"
@@ -851,11 +950,7 @@ skyline_select_gain_adjustments() {
       ;;
   esac
   SKYLINE_SELECTED_GAIN_MODE="$choice"
-  if [ "$SKYLINE_SELECTED_PROFILE" = "default" ] && [ "$choice" -eq 1 ]; then
-    SKYLINE_APPLY_MODULE_MODE=reset
-  else
-    SKYLINE_APPLY_MODULE_MODE=set
-  fi
+  SKYLINE_APPLY_MODULE_MODE=set
 }
 
 skyline_write_profile() {
@@ -879,6 +974,10 @@ SKYLINE_PROFILE_NAME=$SKYLINE_SELECTED_PROFILE
 SKYLINE_SELECTED_GAIN_MODE=${SKYLINE_SELECTED_GAIN_MODE:-1}
 SKYLINE_APPLY_MODULE_MODE=${SKYLINE_APPLY_MODULE_MODE:-set}
 SKYLINE_RTT_MS=$rtt_ms
+SKYLINE_BANDWIDTH_MBPS=${SKYLINE_BANDWIDTH_MBPS:-unknown}
+SKYLINE_BANDWIDTH_SOURCE=${SKYLINE_BANDWIDTH_SOURCE:-unknown}
+SKYLINE_PACING_GAIN_FOR_CAP=${SKYLINE_PACING_GAIN_FOR_CAP:-unknown}
+SKYLINE_LOSS_COMPENSATION_FOR_CAP=${SKYLINE_LOSS_COMPENSATION_FOR_CAP:-unknown}
 SKYLINE_STUN_HOST=$(printf '%q' "$stun_host")
 SKYLINE_STUN_TARGETS=$(printf '%q' "$stun_targets")
 SKYLINE_STUN_PORT=$stun_port
@@ -898,6 +997,7 @@ SKYLINE_MAX_CWND_PACKETS=$SKYLINE_MAX_CWND_PACKETS
 SKYLINE_MAX_QUEUE_DELAY_MS=$SKYLINE_MAX_QUEUE_DELAY_MS
 SKYLINE_MAX_QUEUE_DELAY_RATIO=$SKYLINE_MAX_QUEUE_DELAY_RATIO
 SKYLINE_INITIAL_CWND_PACKETS=$SKYLINE_INITIAL_CWND_PACKETS
+SKYLINE_MIN_CWND_PACKETS=$SKYLINE_MIN_CWND_PACKETS
 SKYLINE_MIN_RTT_WINDOW_S=$SKYLINE_MIN_RTT_WINDOW_S
 SKYLINE_BW_WINDOW_RTTS=$SKYLINE_BW_WINDOW_RTTS
 SKYLINE_STARTUP_PLATEAU_RTTS=$SKYLINE_STARTUP_PLATEAU_RTTS
@@ -1029,28 +1129,27 @@ skyline_apply_selected_profile() {
   fi
   # shellcheck disable=SC1090
   . "$SKYLINE_PROFILE_FILE"
-  if [ "${SKYLINE_APPLY_MODULE_MODE:-set}" = "reset" ]; then
-    ssctl reset-module-config >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
-  else
-    # set-module-config is a full replacement interface. Pass every value
-    # from the selected usage.md recipe, including unchanged values.
-    ssctl set-module-config \
-      --max-pacing-mbps "$SKYLINE_MAX_PACING_MBPS" \
-      --max-cwnd-packets "$SKYLINE_MAX_CWND_PACKETS" \
-      --max-queue-delay-ms "$SKYLINE_MAX_QUEUE_DELAY_MS" \
-      --max-queue-delay-ratio "$SKYLINE_MAX_QUEUE_DELAY_RATIO" \
-      --initial-cwnd-packets "$SKYLINE_INITIAL_CWND_PACKETS" \
-      --min-rtt-window-s "$SKYLINE_MIN_RTT_WINDOW_S" \
-      --bw-window-rtts "$SKYLINE_BW_WINDOW_RTTS" \
-      --startup-plateau-rtts "$SKYLINE_STARTUP_PLATEAU_RTTS" \
-      --startup-growth-ratio "$SKYLINE_STARTUP_GROWTH_RATIO" \
-      --startup-gain "$SKYLINE_STARTUP_GAIN" \
-      --cruise-inflight-gain "$SKYLINE_CRUISE_INFLIGHT_GAIN" \
-      --cruise-pacing-gain "$SKYLINE_CRUISE_PACING_GAIN" \
-      --guardrail-gain "$SKYLINE_GUARDRAIL_GAIN" \
-      --loss-inflation-max-ratio "$SKYLINE_LOSS_INFLATION_MAX_RATIO" \
-      >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
-  fi
+  # set-module-config is a full replacement interface. Always pass every
+  # value from the selected usage.md recipe, including the dynamic cap. Do not
+  # use reset-module-config here: on upgraded hosts it restores the old values
+  # from speeder.toml rather than the current usage.md defaults.
+  ssctl set-module-config \
+    --max-pacing-mbps "$SKYLINE_MAX_PACING_MBPS" \
+    --max-cwnd-packets "$SKYLINE_MAX_CWND_PACKETS" \
+    --max-queue-delay-ms "$SKYLINE_MAX_QUEUE_DELAY_MS" \
+    --max-queue-delay-ratio "$SKYLINE_MAX_QUEUE_DELAY_RATIO" \
+    --initial-cwnd-packets "$SKYLINE_INITIAL_CWND_PACKETS" \
+    --min-cwnd-packets "$SKYLINE_MIN_CWND_PACKETS" \
+    --min-rtt-window-s "$SKYLINE_MIN_RTT_WINDOW_S" \
+    --bw-window-rtts "$SKYLINE_BW_WINDOW_RTTS" \
+    --startup-plateau-rtts "$SKYLINE_STARTUP_PLATEAU_RTTS" \
+    --startup-growth-ratio "$SKYLINE_STARTUP_GROWTH_RATIO" \
+    --startup-gain "$SKYLINE_STARTUP_GAIN" \
+    --cruise-inflight-gain "$SKYLINE_CRUISE_INFLIGHT_GAIN" \
+    --cruise-pacing-gain "$SKYLINE_CRUISE_PACING_GAIN" \
+    --guardrail-gain "$SKYLINE_GUARDRAIL_GAIN" \
+    --loss-inflation-max-ratio "$SKYLINE_LOSS_INFLATION_MAX_RATIO" \
+    >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
   # Manual profile selection does not create an automatic RACK RTO policy.
   ssctl reset-rack-rto >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
   ssctl status >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
@@ -1153,14 +1252,15 @@ run_skyline_optimize() {
     return 0
   fi
   info "只探测 STUN RTT，不再根据 RTT、带宽或内存自动配置参数。"
-  info "探测完成后由你选择 usage.md 的保守、默认或激进档，再选择 gain 调整方式。"
-  info "目标机使用 --prebuilt，不安装 clang、LLVM 或 Rust 编译工具链。"
+  info "探测完成后由你选择 usage.md 的保守、默认、激进或旧默认档，再选择 gain 调整方式。"
+  info "Skyline 安装流程可单独选择自动测速或手动填写上行带宽；该选项不影响其他测速流程。"
+  info "目标机通过 --prebuilt 安装预编译包，不走新版安装器默认的源码构建。"
   skyline_preflight || return 1
   mkdir -p "$WORK_DIR"
   : > "$SKYLINE_LOG_FILE"
   skyline_prepare_kernel || return 1
 
-  local rtt_ms installer
+  local rtt_ms installer profile_label
   skyline_detect_rtt_ms
   rtt_ms="${SKYLINE_DETECTED_RTT_MS:-$SKYLINE_RTT_FALLBACK_MS_DEFAULT}"
   printf "STUN RTT 探测完成：最差目标=%s，平均 RTT=%sms，丢失=%s%%，抖动=%sms\n" \
@@ -1169,20 +1269,24 @@ run_skyline_optimize() {
 
   skyline_select_manual_profile
   skyline_select_gain_adjustments
+  skyline_select_bandwidth_mode
+  skyline_detect_pacing_mbps
   skyline_write_profile "$rtt_ms"
+  case "$SKYLINE_SELECTED_PROFILE" in
+    conservative) profile_label=保守档 ;;
+    aggressive) profile_label=激进档 ;;
+    legacy) profile_label=旧默认档 ;;
+    *) profile_label=默认档 ;;
+  esac
   echo
   echo "最终 Skyline 参数："
   printf '  档位=%s | max-pacing=%sMbps | max-cwnd=%s | queue-delay=%sms\n' \
-    "$SKYLINE_SELECTED_PROFILE" "$SKYLINE_MAX_PACING_MBPS" "$SKYLINE_MAX_CWND_PACKETS" "$SKYLINE_MAX_QUEUE_DELAY_MS"
-  printf '  initial-cwnd=%s | startup-gain=%s | cruise-inflight=%s\n' \
-    "$SKYLINE_INITIAL_CWND_PACKETS" "$SKYLINE_STARTUP_GAIN" "$SKYLINE_CRUISE_INFLIGHT_GAIN"
+    "$profile_label" "$SKYLINE_MAX_PACING_MBPS" "$SKYLINE_MAX_CWND_PACKETS" "$SKYLINE_MAX_QUEUE_DELAY_MS"
+  printf '  bandwidth=%sMbps | memory=%sMB | initial-cwnd=%s | startup-gain=%s | cruise-inflight=%s\n' \
+    "$SKYLINE_BANDWIDTH_MBPS" "$SKYLINE_MEMORY_MB" "$SKYLINE_INITIAL_CWND_PACKETS" "$SKYLINE_STARTUP_GAIN" "$SKYLINE_CRUISE_INFLIGHT_GAIN"
   printf '  cruise-pacing-gain=%s | guardrail-gain=%s | loss-ratio=%s\n' \
     "$SKYLINE_CRUISE_PACING_GAIN" "$SKYLINE_GUARDRAIL_GAIN" "$SKYLINE_LOSS_INFLATION_MAX_RATIO"
-  if [ "${SKYLINE_APPLY_MODULE_MODE:-set}" = "reset" ]; then
-    info "默认档且未修改 gain：应用时将调用 ssctl reset-module-config。"
-  else
-    info "应用时将完整传入上述 14 个参数，避免 ssctl 全量覆盖造成隐式重置。"
-  fi
+  info "应用时将完整传入所选档位和动态 max-pacing-mbps，避免旧配置文件影响默认档。"
   if [ -t 0 ] && ! confirm_action "确认安装并应用以上 Skyline 参数？默认回车 = Y"; then
     warn "已取消 Skyline 安装和参数应用。"
     return 0
@@ -1196,9 +1300,9 @@ run_skyline_optimize() {
   fi
   local install_rc=0
   if [ -n "${SKYLINE_RELEASE:-}" ]; then
-    SKYLINE_REPO="${SKYLINE_REPO:-$SKYLINE_REPO_DEFAULT}" bash "$installer" --prebuilt --release "$SKYLINE_RELEASE" >>"$SKYLINE_LOG_FILE" 2>&1 || install_rc=$?
+    SKYLINE_REPO="${SKYLINE_REPO:-$SKYLINE_REPO_DEFAULT}" SKYLINE_ARTIFACT_URL="${SKYLINE_ARTIFACT_URL:-}" bash "$installer" --prebuilt --release "$SKYLINE_RELEASE" >>"$SKYLINE_LOG_FILE" 2>&1 || install_rc=$?
   else
-    SKYLINE_REPO="${SKYLINE_REPO:-$SKYLINE_REPO_DEFAULT}" bash "$installer" --prebuilt >>"$SKYLINE_LOG_FILE" 2>&1 || install_rc=$?
+    SKYLINE_REPO="${SKYLINE_REPO:-$SKYLINE_REPO_DEFAULT}" SKYLINE_ARTIFACT_URL="${SKYLINE_ARTIFACT_URL:-}" bash "$installer" --prebuilt >>"$SKYLINE_LOG_FILE" 2>&1 || install_rc=$?
   fi
   rm -f "$installer"
   if [ "$install_rc" -ne 0 ]; then
