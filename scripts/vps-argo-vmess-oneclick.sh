@@ -978,12 +978,14 @@ skyline_download_installer() {
 skyline_link_bpftool() {
   # linux-tools-generic drops the per-kernel bpftool into
   # /usr/lib/linux-tools/<kver>/bpftool but puts no symlink on PATH, so
-  # `command -v bpftool` stays empty on a fresh install. Scan the versioned
-  # directories (kver is not fixed -- e.g. 6.8.0-139-generic) and link the
+  # `command -v bpftool` stays empty on a fresh install. On Debian/Ubuntu
+  # the <kver> entry itself is a symlink to /usr/lib/linux-tools-<kver>/,
+  # so find needs -L to descend into it at all. Scan the versioned
+  # directories (kver is not fixed -- e.g. 6.8.0-142-generic) and link the
   # newest match into /usr/local/bin.
   local found=""
-  if [ -d /usr/lib/linux-tools ]; then
-    found="$(find /usr/lib/linux-tools -mindepth 2 -maxdepth 2 -type f -name bpftool -perm -u+x 2>/dev/null | sort -V | tail -n 1)"
+  if [ -d /usr/lib/linux-tools ] || [ -L /usr/lib/linux-tools ]; then
+    found="$(find -L /usr/lib/linux-tools -mindepth 2 -maxdepth 2 -type f -name bpftool -perm -u+x 2>/dev/null | sort -V | tail -n 1)"
   fi
   [ -n "$found" ] || return 1
   ln -sf "$found" /usr/local/bin/bpftool
