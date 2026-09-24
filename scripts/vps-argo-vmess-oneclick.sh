@@ -1086,6 +1086,62 @@ skyline_preflight() {
   grep -qw cgroup2 /proc/filesystems 2>/dev/null || { err "当前内核未启用 cgroup v2。"; return 1; }
 }
 
+skyline_persist_profile() {
+  # ssctl set-module-config is runtime-only state: it is lost when
+  # skyline-speederd restarts. usage.md「让档位重启后依然生效」says to persist
+  # through /etc/skyline-speeder/speeder.toml and validate before relying on
+  # it. Rewrite the 15 tuned fields in place (backup first); on any failure
+  # restore the backup so the file never holds a rejected profile.
+  local toml="/etc/skyline-speeder/speeder.toml"
+  local backup="${toml}.speed-slayer.bak" line field value
+  [ -f "$toml" ] || { warn "未找到 $toml，参数仅在本次运行生效（重启后回落安装时默认值）。"; return 0; }
+  cp -f "$toml" "$backup" || { warn "无法备份 $toml，跳过持久化；参数仅在本次运行生效。"; return 0; }
+
+  # top-level --max-* fields, then [adaptive_cwnd] / [loss_classifier] gains,
+  # exactly the mapping usage.md documents for the two config sections.
+  printf '%s\n' \
+    "max_pacing_mbps|$SKYLINE_MAX_PACING_MBPS" \
+    "max_cwnd_packets|$SKYLINE_MAX_CWND_PACKETS" \
+    "max_queue_delay_ms|$SKYLINE_MAX_QUEUE_DELAY_MS" \
+    "max_queue_delay_ratio|$SKYLINE_MAX_QUEUE_DELAY_RATIO" \
+    "initial_cwnd_packets|$SKYLINE_INITIAL_CWND_PACKETS" \
+    "min_cwnd_packets|$SKYLINE_MIN_CWND_PACKETS" \
+    "min_rtt_window_s|$SKYLINE_MIN_RTT_WINDOW_S" \
+    "bw_window_rtts|$SKYLINE_BW_WINDOW_RTTS" \
+    "startup_plateau_rtts|$SKYLINE_STARTUP_PLATEAU_RTTS" \
+    "startup_growth_ratio|$SKYLINE_STARTUP_GROWTH_RATIO" \
+    "startup_gain|$SKYLINE_STARTUP_GAIN" \
+    "cruise_inflight_gain|$SKYLINE_CRUISE_INFLIGHT_GAIN" \
+    "cruise_pacing_gain|$SKYLINE_CRUISE_PACING_GAIN" \
+    "guardrail_gain|$SKYLINE_GUARDRAIL_GAIN" \
+    "loss_inflation_max_ratio|$SKYLINE_LOSS_INFLATION_MAX_RATIO" \
+    | while IFS='|' read -r field value; do
+      # Replace only the value of an existing "field = ..." line (first match,
+      # commented lines excluded: '^field' anchors at column 0).
+      sed -i "0,/^[[:space:]]*${field}[[:space:]]*=/s|^[[:space:]]*${field}[[:space:]]*=.*|${field} = ${value}|" "$toml" 2>/dev/null
+    done
+
+  if command -v skyline-speederd >/dev/null 2>&1; then
+    if skyline-speederd --config "$toml" --validate-only >>"$SKYLINE_LOG_FILE" 2>&1; then
+      rm -f "$backup"
+      success "参数已持久化到 $toml（已通过 --validate-only 校验，重启后保持生效）。"
+    else
+      cp -f "$backup" "$toml"
+      warn "speeder.toml 校验未通过，已还原为修改前内容；参数仅在本次运行生效。"
+    fi
+  else
+    # No daemon binary to validate with (unusual post-install) -- keep the
+    # edit only if the file still parses as plain TOML assignments.
+    if grep -q '^max_pacing_mbps' "$toml"; then
+      warn "未找到 skyline-speederd 校验程序，已写入但未校验 $toml；重启前建议手动执行 --validate-only。"
+    else
+      cp -f "$backup" "$toml"
+      warn "speeder.toml 写入失败，已还原；参数仅在本次运行生效。"
+    fi
+  fi
+  return 0
+}
+
 skyline_apply_selected_profile() {
   require_root
   if ! command -v ssctl >/dev/null 2>&1 || [ ! -S /run/skyline-speeder/speeder.sock ]; then
@@ -1118,6 +1174,7 @@ skyline_apply_selected_profile() {
   # Manual profile selection does not create an automatic RACK RTO policy.
   ssctl reset-rack-rto >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
   ssctl status >>"$SKYLINE_LOG_FILE" 2>&1 || return 1
+  skyline_persist_profile
   success "Skyline ${SKYLINE_PROFILE_NAME:-default} 档已应用：guardrail-gain=${SKYLINE_GUARDRAIL_GAIN}，cruise-pacing-gain=${SKYLINE_CRUISE_PACING_GAIN}"
   echo "参数档案：$SKYLINE_PROFILE_FILE"
   echo "详细日志：$SKYLINE_LOG_FILE"
@@ -1272,6 +1329,55 @@ run_skyline_optimize() {
     err "Skyline Speeder 预编译安装失败（退出码 $install_rc），日志：$SKYLINE_LOG_FILE"
     tail -n 40 "$SKYLINE_LOG_FILE" || true
     return "$install_rc"
+  fi
+  skyline_apply_selected_profile
+}
+
+run_skyline_reconfigure() {
+  # Re-tune an already-installed Skyline without redoing the install:
+  # no preflight/kernel prep, no installer download, just profile ->
+  # adjustments -> apply -> persist. The daemon must be running, since
+  # ssctl talks to it over /run/skyline-speeder/speeder.sock.
+  require_root
+  render_header_once
+  section "Speed Slayer · Skyline Speeder 重设配置"
+  if ! command -v ssctl >/dev/null 2>&1 || [ ! -S /run/skyline-speeder/speeder.sock ]; then
+    err "未检测到正在运行的 Skyline Speeder（缺少 ssctl 或 speeder.sock）。"
+    echo "如尚未安装，请执行：speed --skyline"
+    return 1
+  fi
+  mkdir -p "$WORK_DIR"
+  : > "$SKYLINE_LOG_FILE"
+  info "跳过安装与内核准备，直接重选档位；已安装守护进程保持运行。"
+
+  local rtt_ms profile_label
+  skyline_detect_rtt_ms
+  rtt_ms="${SKYLINE_DETECTED_RTT_MS:-$SKYLINE_RTT_FALLBACK_MS_DEFAULT}"
+  printf "STUN RTT 探测完成：最差目标=%s，平均 RTT=%sms，丢失=%s%%，抖动=%sms\n" \
+    "${SKYLINE_STUN_WORST_TARGET:-none}" "$rtt_ms" \
+    "${SKYLINE_STUN_WORST_LOSS_PERCENT:-100}" "${SKYLINE_STUN_WORST_JITTER_MS:-0}"
+
+  skyline_select_manual_profile
+  skyline_select_gain_adjustments
+  skyline_write_profile "$rtt_ms"
+  case "$SKYLINE_SELECTED_PROFILE" in
+    conservative) profile_label=保守档 ;;
+    aggressive) profile_label=激进档 ;;
+    legacy) profile_label=旧默认档 ;;
+    *) profile_label=默认档 ;;
+  esac
+  echo
+  echo "最终 Skyline 参数（usage.md 配方）："
+  printf '  档位=%s | max-pacing=%sMbps | max-cwnd=%s | queue-delay=%sms\n' \
+    "$profile_label" "$SKYLINE_MAX_PACING_MBPS" "$SKYLINE_MAX_CWND_PACKETS" "$SKYLINE_MAX_QUEUE_DELAY_MS"
+  printf '  initial-cwnd=%s | min-cwnd=%s | startup-gain=%s | cruise-inflight=%s\n' \
+    "$SKYLINE_INITIAL_CWND_PACKETS" "$SKYLINE_MIN_CWND_PACKETS" "$SKYLINE_STARTUP_GAIN" "$SKYLINE_CRUISE_INFLIGHT_GAIN"
+  printf '  cruise-pacing-gain=%s | guardrail-gain=%s | loss-ratio=%s\n' \
+    "$SKYLINE_CRUISE_PACING_GAIN" "$SKYLINE_GUARDRAIL_GAIN" "$SKYLINE_LOSS_INFLATION_MAX_RATIO"
+  info "应用时将完整传入上述 15 个参数；ssctl set-module-config 是全量覆盖接口。"
+  if [ -t 0 ] && ! confirm_action "确认应用以上 Skyline 参数？默认回车 = Y"; then
+    warn "已取消 Skyline 参数重设，当前配置保持不变。"
+    return 0
   fi
   skyline_apply_selected_profile
 }
@@ -2793,6 +2899,7 @@ Commands:
   --tcp                  单独执行 TCP 调优流程（等同 --optimize）
   --tcp-skyline          执行已有 TCP 调优后，再安装并手动选择 Skyline 配置
   --skyline              安装并手动选择 Skyline 配置（免编译工具链）
+  --skyline-reconfigure  重设已安装 Skyline 的档位配置（不重走安装流程）
   --skyline-status       查看 Skyline Speeder 状态
   --skyline-rollback     卸载并回滚 Skyline Speeder 特殊优化配置
   --optimize             单独执行 TCP 调优流程：BBR/XanMod/容器降级 + 网络参数
@@ -2877,9 +2984,10 @@ menu_section_tcp() {
 2. 执行 TCP 优化
 3. TCP 优化 + Skyline Speeder 后置优化 ⭐
 4. 单独安装 / 手动选择 Skyline 配置
-5. 查看 Skyline Speeder 状态
-6. 重启后继续安装
-7. 回滚 Skyline Speeder 特殊优化
+5. 重设已安装 Skyline 的档位配置
+6. 查看 Skyline Speeder 状态
+7. 重启后继续安装
+8. 回滚 Skyline Speeder 特殊优化
 0. 返回主页
 EOF
     read -r -p "请选择: " choice
@@ -2888,9 +2996,10 @@ EOF
       2) run_tcp_optimize; menu_pause ;;
       3) run_tcp_then_skyline; menu_pause ;;
       4) run_skyline_optimize; menu_pause ;;
-      5) skyline_status; menu_pause ;;
-      6) continue_after_reboot; menu_pause ;;
-      7) skyline_rollback; menu_pause ;;
+      5) run_skyline_reconfigure; menu_pause ;;
+      6) skyline_status; menu_pause ;;
+      7) continue_after_reboot; menu_pause ;;
+      8) skyline_rollback; menu_pause ;;
       0) return 0 ;;
       *) err "无效选择"; menu_pause ;;
     esac
@@ -2998,6 +3107,7 @@ case "${1:-}" in
   --tcp) run_tcp_optimize ;;
   --tcp-skyline) run_tcp_then_skyline ;;
   --skyline) run_skyline_optimize ;;
+  --skyline-reconfigure) run_skyline_reconfigure ;;
   --skyline-status) skyline_status ;;
   --skyline-rollback) skyline_rollback ;;
   --optimize) run_tcp_optimize ;;

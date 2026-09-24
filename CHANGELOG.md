@@ -14,6 +14,8 @@
 - 缺少 `tcpdump`、`turnutils_stunclient`、`ip` 或 `timeout` 时自动安装 `tcpdump`、`coturn`、`iproute2`、`coreutils`；不再使用 `hping3` 或 ICMP ping 推断 RTT。
 - 三个 STUN 目标均无响应时记录回退 RTT 并交由用户选择；不自动设置自定义 RTO。
 - 四档配方的全部 15 个参数（含 `max-pacing-mbps` 的 1200/2000）严格照抄 usage.md「四档现成配方」，不做任何动态计算；`max-pacing-mbps` 仅可通过 8 个调整选项手动覆盖。
+- 新增 `speed --skyline-reconfigure` / TCP 子菜单“重设已安装 Skyline 的档位配置”：已安装机器跳过安装与内核准备，直接重选四档配方和 8 个调整选项并应用持久化，不重走安装流程。
+- 应用档位后按 usage.md「让档位重启后依然生效」把 15 个参数持久化写入 `/etc/skyline-speeder/speeder.toml`（先备份），并通过 `skyline-speederd --validate-only` 校验；校验失败自动还原备份并明确提示重启会回落。
 - 新版 Skyline `install.sh` 默认源码构建；Speed Slayer 明确使用 `--prebuilt`，支持 `SKYLINE_RELEASE` 固定 release 和 `SKYLINE_ARTIFACT_URL` 指定本地/镜像 artifact，并兼容 SHA256 校验与升级保留配置行为。
 - 增加 `SKYLINE_STUN_HOST`、`SKYLINE_STUN_TARGETS`、`SKYLINE_STUN_PORT`、`SKYLINE_STUN_PROBE_COUNT`、`SKYLINE_STUN_TIMEOUT`、`SKYLINE_STUN_INTERVAL` 及 profile 探测明细记录。
 

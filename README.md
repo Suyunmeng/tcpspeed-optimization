@@ -175,9 +175,10 @@ TCP 子菜单包含：
 2. 执行 TCP 优化
 3. TCP 优化 + Skyline Speeder 后置优化
 4. 单独安装 / 手动选择 Skyline 配置
-5. 查看 Skyline Speeder 状态
-6. 重启后继续安装
-7. 回滚 Skyline Speeder 特殊优化
+5. 重设已安装 Skyline 的档位配置
+6. 查看 Skyline Speeder 状态
+7. 重启后继续安装
+8. 回滚 Skyline Speeder 特殊优化
 0. 返回主页
 ```
 
@@ -196,6 +197,7 @@ speed --force-all      # 等同 speed --all
 speed --tcp            # 单独执行 TCP 调优
 speed --tcp-skyline    # 执行已有 TCP 调优，然后安装并手动选择 Skyline 配置
 speed --skyline        # 仅安装并手动选择 Skyline 配置（免编译工具链）
+speed --skyline-reconfigure # 重设已安装 Skyline 的档位配置（不重走安装流程）
 speed --skyline-status # 查看 Skyline Speeder 运行状态
 speed --skyline-rollback # 卸载 Skyline 并回滚特殊优化配置
 speed --optimize       # 等同 speed --tcp
@@ -229,6 +231,14 @@ speed --skyline
 speed --tcp-skyline
 ```
 
+Skyline 已安装后想换档位，不需要重走安装流程，执行：
+
+```bash
+speed --skyline-reconfigure
+```
+
+它会跳过安装与内核准备（守护进程保持运行），直接重新探测 STUN RTT、让你选四档配方和 8 个调整选项，然后应用并持久化。`speed --skyline` 在已安装机器上重复执行也没有危害（安装器支持重装/升级），但重设配置用 `--skyline-reconfigure` 更快，也不会动正在服务的守护进程二进制。
+
 该阶段会：
 
 1. 检查 Debian / Ubuntu、6.12+ 内核、内核 BTF 和 cgroup v2。
@@ -241,6 +251,7 @@ speed --tcp-skyline
 8. 应用前显示最终完整参数并要求确认。`ssctl set-module-config` 是全量覆盖接口，因此总是一次性写入配方 15 个参数（包括 `min-cwnd-packets` 和 `max-pacing-mbps`）；默认档的显式参数与新版 `ssctl` 内置默认值一致，即便升级机器的 `speeder.toml` 仍是旧值也能落到新默认档，所以不使用 `reset-module-config`。
 9. 下载 Skyline Speeder 的 `install.sh` 并显式调用 `--prebuilt`：新版安装器默认源码编译，Speed Slayer 为免装 clang、LLVM、Rust 而选择预编译包；支持 `SKYLINE_RELEASE` 锁定版本和 `SKYLINE_ARTIFACT_URL` 指定本地/镜像包。安装器会校验可用的 SHA256；上游没有摘要时会提示仅依赖 TLS 信任。
 10. 应用用户确认的模块参数，然后执行 `ssctl reset-rack-rto`，不再自动创建自定义 RACK RTO 策略，最后输出 `ssctl status`。
+11. 参数会按 usage.md「让档位重启后依然生效」持久化到 `/etc/skyline-speeder/speeder.toml`（写入前备份）：顶层字段对应 `--max-*` 系列，`[adaptive_cwnd]` / `[loss_classifier]` 段对应各 gain；写入后执行 `skyline-speederd --validate-only` 校验，校验失败自动还原备份并提示本次运行有效、重启回落。
 
 STUN RTT 探测默认使用 `stun.hitv.com:3478`，但会直接连接以下指定 IP，避免 DNS 结果变动影响三网比较：
 
