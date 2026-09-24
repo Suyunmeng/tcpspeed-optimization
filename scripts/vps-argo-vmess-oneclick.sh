@@ -975,6 +975,21 @@ skyline_download_installer() {
   chmod 700 "$out"
 }
 
+skyline_link_bpftool() {
+  # linux-tools-generic drops the per-kernel bpftool into
+  # /usr/lib/linux-tools/<kver>/bpftool but puts no symlink on PATH, so
+  # `command -v bpftool` stays empty on a fresh install. Scan the versioned
+  # directories (kver is not fixed -- e.g. 6.8.0-139-generic) and link the
+  # newest match into /usr/local/bin.
+  local found=""
+  if [ -d /usr/lib/linux-tools ]; then
+    found="$(find /usr/lib/linux-tools -mindepth 2 -maxdepth 2 -type f -name bpftool -perm -u+x 2>/dev/null | sort -V | tail -n 1)"
+  fi
+  [ -n "$found" ] || return 1
+  ln -sf "$found" /usr/local/bin/bpftool
+  info "bpftool 已链接：/usr/local/bin/bpftool -> $found"
+}
+
 skyline_prepare_kernel() {
   require_root
   mkdir -p "$WORK_DIR"
@@ -995,6 +1010,9 @@ skyline_prepare_kernel() {
       return 1
     }
   fi
+  # linux-tools-generic installs bpftool only under /usr/lib/linux-tools/<kver>/,
+  # not on PATH. Link the versioned binary before the existence check.
+  skyline_link_bpftool || true
   command -v bpftool >/dev/null 2>&1 || {
     err "安装后仍未找到 bpftool，无法继续 Skyline Speeder。"
     return 1

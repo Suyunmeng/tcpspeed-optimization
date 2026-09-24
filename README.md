@@ -232,7 +232,7 @@ speed --tcp-skyline
 该阶段会：
 
 1. 检查 Debian / Ubuntu、6.12+ 内核、内核 BTF 和 cgroup v2。
-2. 检查 `bpftool`；如果缺失，执行 `apt install -y linux-tools-common linux-tools-generic`（前置步骤会先刷新 APT 索引），安装后仍找不到命令则终止。
+2. 检查 `bpftool`；如果缺失，执行 `apt install -y linux-tools-common linux-tools-generic`（前置步骤会先刷新 APT 索引）。`linux-tools-generic` 只把 bpftool 装进 `/usr/lib/linux-tools/<内核版本>/`（如 `6.8.0-139-generic`，版本号不固定）而不上 PATH，脚本会扫描该目录树并自动把最新版本的 bpftool 链接到 `/usr/local/bin/bpftool`；仍找不到命令则终止。
 3. 执行 `modprobe tcp_cubic`，确认内核的可用拥塞控制列表包含 `cubic`；模块无法加载或内核没有 `cubic` 时立即失败，不继续安装 Skyline。
 4. 将 `tcp_cubic` 写入 `/etc/modules-load.d/99-speed-slayer-cubic.conf`，确保重启后仍可加载，并记录本次变更。
 5. 使用 `stun.hitv.com:3478` 的 STUN 协议探测三个指定 IP，输出每个目标的 Sent、Received、Packet loss、Min RTT、Avg RTT、Max RTT 和 Jitter。RTT 统计沿用参考脚本的 `success/sum/min/max/avg/loss` 逻辑；丢包率优先、平均 RTT 次之选择最差目标。

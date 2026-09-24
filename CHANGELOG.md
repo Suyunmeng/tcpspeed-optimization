@@ -6,7 +6,7 @@
 - 新增 `speed --tcp-skyline`，在已有 TCP 调优完成后可选安装 Skyline Speeder。
 - 新增 `speed --skyline` / `speed --skyline-status` / `speed --skyline-rollback` 及 TCP 子菜单入口。
 - Skyline 阶段使用 `--prebuilt` 预编译 release，不在目标机安装 clang、LLVM 或 Rust 编译工具链。
-- Skyline 安装前检查 `bpftool` 和 `tcp_cubic`；缺失 `bpftool` 时自动安装 `linux-tools-common`、`linux-tools-generic`，无法加载或验证 `cubic` 时终止。
+- Skyline 安装前检查 `bpftool` 和 `tcp_cubic`；缺失 `bpftool` 时自动安装 `linux-tools-common`、`linux-tools-generic`，并扫描 `/usr/lib/linux-tools/<内核版本>/` 把最新版本的 bpftool 自动链接到 `/usr/local/bin/bpftool`（该包不上 PATH），无法加载或验证 `cubic` 时终止。
 - 取消 Skyline 模块和 RACK RTO 的自动调参；保留 STUN RTT 探测，并在探测完成后让用户选择参数档。
 - 增加 usage.md 保守 / 默认 / 激进 / 旧默认（高随机丢包）四档交互选项；调整选项扩展为 8 个，覆盖 `guardrail-gain`、`cruise-pacing-gain`、`max-pacing-mbps` 的单项及全部组合；应用前完整覆盖模块参数（含 `min-cwnd-packets`）。
 - Skyline RTT 探测面向中国大陆方向长 RTT / 随机丢包链路：使用 `stun.hitv.com:3478` 的指定三网 IP STUN 实测结果供用户选择档位参考。
