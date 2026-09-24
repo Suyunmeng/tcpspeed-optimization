@@ -789,9 +789,10 @@ skyline_select_bandwidth_mode() {
 
 skyline_detect_pacing_mbps() {
   local bandwidth measured pacing_gain loss_ratio compensation pacing
-  # max-pacing-mbps is a per-connection hard ceiling, not a host-wide rate.
-  # Measure the host's upload capacity first; the selected profile is applied
-  # below, so the final ceiling is calculated after its gains are known.
+  # max-pacing-mbps is the machine's per-connection rate ceiling, not a
+  # host-wide rate. Measure the host's upload capacity first; the selected
+  # profile is applied below, so the final ceiling is calculated after its
+  # gains are known.
   if [ -n "${SPEED_BANDWIDTH_MBPS:-}" ] && printf '%s' "$SPEED_BANDWIDTH_MBPS" | grep -Eq '^[0-9]+$'; then
     bandwidth="$SPEED_BANDWIDTH_MBPS"
     SKYLINE_BANDWIDTH_SOURCE=manual
@@ -826,7 +827,8 @@ skyline_detect_pacing_mbps() {
   compensation="$(awk -v loss="$loss_ratio" 'BEGIN { if (loss >= 0.5) print "2.0"; else printf "%.6f", 1 / (1 - loss) }')"
   # Add 10% headroom so rounding and a small measured-bandwidth variation do
   # not make the cap the active limiter. The result remains bounded to a
-  # practical per-flow value; low-bandwidth hosts are not forced to 1200Mbps.
+  # practical per-flow value; low-bandwidth hosts are not forced to 1200Mbps
+  # and high-bandwidth hosts are not clipped to the recipe's 1200/2000.
   pacing="$(awk -v bw="$bandwidth" -v gain="$pacing_gain" -v comp="$compensation" \
     'BEGIN { value = bw * gain * comp * 1.10; printf "%d", value + 0.999999 }')"
   pacing="$(skyline_clamp_int "$pacing" 1 100000)"
@@ -837,6 +839,13 @@ skyline_detect_pacing_mbps() {
 
 skyline_set_profile_defaults() {
   local profile="$1"
+  # The fourteen non-cap values below are copied verbatim from the four
+  # recipes in skyline-speeder/docs/usage.md section 四「四档现成配方」.
+  # max-pacing-mbps is the machine's rate ceiling: usage.md pins it at 1200
+  # (conservative/default/legacy) or 2000 (aggressive), but Speed Slayer
+  # computes it per host from the measured or manually entered upload
+  # bandwidth in skyline_detect_pacing_mbps(), after this profile (and any
+  # gain edits) are known.
   case "$profile" in
     conservative)
       SKYLINE_MAX_CWND_PACKETS=50000
@@ -860,6 +869,11 @@ skyline_set_profile_defaults() {
       SKYLINE_CRUISE_INFLIGHT_GAIN=2.0; SKYLINE_CRUISE_PACING_GAIN=1.1; SKYLINE_GUARDRAIL_GAIN=0.8
       SKYLINE_LOSS_INFLATION_MAX_RATIO=0.5 ;;
     *)
+      # usage.md ② 默认档. The explicit values equal the new ssctl built-in
+      # defaults (qdelay 70/0.6, startup 3.0, pacing 1.25, guardrail 0.8,
+      # loss 0.10), so a full set-module-config applies the current default
+      # profile even on hosts upgraded from 0.1.0 whose speeder.toml still
+      # holds the old ④ values.
       SKYLINE_MAX_CWND_PACKETS=50000
       SKYLINE_MAX_QUEUE_DELAY_MS=70; SKYLINE_MAX_QUEUE_DELAY_RATIO=0.6
       SKYLINE_INITIAL_CWND_PACKETS=100; SKYLINE_MIN_CWND_PACKETS=4; SKYLINE_MIN_RTT_WINDOW_S=30; SKYLINE_BW_WINDOW_RTTS=6
@@ -1252,7 +1266,8 @@ run_skyline_optimize() {
     return 0
   fi
   info "只探测 STUN RTT，不再根据 RTT、带宽或内存自动配置参数。"
-  info "探测完成后由你选择 usage.md 的保守、默认、激进或旧默认档，再选择 gain 调整方式。"
+  info "探测完成后由你选择 usage.md 的四档配方（保守/默认/激进/旧默认），再选择 gain 调整方式。"
+  info "档位的 14 个参数完全照抄 usage.md；max-pacing-mbps 按机器上行能力动态计算。"
   info "Skyline 安装流程可单独选择自动测速或手动填写上行带宽；该选项不影响其他测速流程。"
   info "目标机通过 --prebuilt 安装预编译包，不走新版安装器默认的源码构建。"
   skyline_preflight || return 1
@@ -1279,14 +1294,14 @@ run_skyline_optimize() {
     *) profile_label=默认档 ;;
   esac
   echo
-  echo "最终 Skyline 参数："
+  echo "最终 Skyline 参数（usage.md 配方 + 动态 max-pacing）："
   printf '  档位=%s | max-pacing=%sMbps | max-cwnd=%s | queue-delay=%sms\n' \
     "$profile_label" "$SKYLINE_MAX_PACING_MBPS" "$SKYLINE_MAX_CWND_PACKETS" "$SKYLINE_MAX_QUEUE_DELAY_MS"
-  printf '  bandwidth=%sMbps | memory=%sMB | initial-cwnd=%s | startup-gain=%s | cruise-inflight=%s\n' \
-    "$SKYLINE_BANDWIDTH_MBPS" "$SKYLINE_MEMORY_MB" "$SKYLINE_INITIAL_CWND_PACKETS" "$SKYLINE_STARTUP_GAIN" "$SKYLINE_CRUISE_INFLIGHT_GAIN"
+  printf '  bandwidth=%sMbps（来源：%s） | initial-cwnd=%s | startup-gain=%s\n' \
+    "$SKYLINE_BANDWIDTH_MBPS" "$SKYLINE_BANDWIDTH_SOURCE" "$SKYLINE_INITIAL_CWND_PACKETS" "$SKYLINE_STARTUP_GAIN"
   printf '  cruise-pacing-gain=%s | guardrail-gain=%s | loss-ratio=%s\n' \
     "$SKYLINE_CRUISE_PACING_GAIN" "$SKYLINE_GUARDRAIL_GAIN" "$SKYLINE_LOSS_INFLATION_MAX_RATIO"
-  info "应用时将完整传入所选档位和动态 max-pacing-mbps，避免旧配置文件影响默认档。"
+  info "应用时将完整传入上述 15 个参数；ssctl set-module-config 是全量覆盖接口。"
   if [ -t 0 ] && ! confirm_action "确认安装并应用以上 Skyline 参数？默认回车 = Y"; then
     warn "已取消 Skyline 安装和参数应用。"
     return 0

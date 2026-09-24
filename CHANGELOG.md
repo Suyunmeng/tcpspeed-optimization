@@ -13,7 +13,7 @@
 - STUN 默认直接测试 `175.6.157.109:3478`、`116.162.157.194:3478`、`111.8.4.248:3478`，记录真实请求/响应 RTT、响应率、丢失率和抖动，按丢失率优先、RTT 次之取最差目标。
 - 缺少 `tcpdump`、`turnutils_stunclient`、`ip` 或 `timeout` 时自动安装 `tcpdump`、`coturn`、`iproute2`、`coreutils`；不再使用 `hping3` 或 ICMP ping 推断 RTT。
 - 三个 STUN 目标均无响应时记录回退 RTT 并交由用户选择；不自动设置自定义 RTO。
-- 按机器上行带宽动态计算 `max-pacing-mbps`，使用所选档位的最大增益和丢包补偿预留 pacing 余量；低带宽机器不再被固定到 1200Mbps。
+- 四档配方中除 `max-pacing-mbps` 外的 14 个参数严格照抄 usage.md「四档现成配方」；`max-pacing-mbps` 按机器上行带宽动态计算（实测/手动带宽 × 档位增益 × 丢包补偿 × 1.1），不再照抄配方的固定 1200/2000，避免高带宽机器被硬上限卡住。
 - 新版 Skyline `install.sh` 默认源码构建；Speed Slayer 明确使用 `--prebuilt`，支持 `SKYLINE_RELEASE` 固定 release 和 `SKYLINE_ARTIFACT_URL` 指定本地/镜像 artifact，并兼容 SHA256 校验与升级保留配置行为。
 - 仅在 Skyline 安装流程内增加带宽来源询问：选择 Ookla Upload 测速或手动填写上行带宽；手动选项跳过测速，不影响其他测速流程。`SPEED_BANDWIDTH_MBPS` 显式设置时跳过询问。
 - 增加 `SKYLINE_STUN_HOST`、`SKYLINE_STUN_TARGETS`、`SKYLINE_STUN_PORT`、`SKYLINE_STUN_PROBE_COUNT`、`SKYLINE_STUN_TIMEOUT`、`SKYLINE_STUN_INTERVAL` 及 profile 探测明细记录。

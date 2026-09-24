@@ -238,8 +238,8 @@ speed --tcp-skyline
 5. 使用 `stun.hitv.com:3478` 的 STUN 协议探测三个指定 IP，输出每个目标的 Sent、Received、Packet loss、Min RTT、Avg RTT、Max RTT 和 Jitter。RTT 统计沿用参考脚本的 `success/sum/min/max/avg/loss` 逻辑；丢包率优先、平均 RTT 次之选择最差目标。
 6. 依次让你选择 Skyline 官方 `docs/usage.md` 中的四档参数：保守档、默认档、激进档、旧默认档（高随机丢包链路）。RTT 只作为链路信息展示和选择参考，不根据 RTT 自动选择档位。
 7. 选择档位后，再选择直接使用档位默认值，或只调整 `guardrail-gain`、只调整 `cruise-pacing-gain`、同时调整两者。`guardrail-gain` 校验范围为 `0-1.0`，`cruise-pacing-gain` 校验范围为不小于 `1.0`。
-8. 仅在 Skyline 安装流程内选择 `max-pacing-mbps` 带宽来源：自动进行 Ookla Upload 测速，或跳过测速并手动填写上行带宽。`SPEED_BANDWIDTH_MBPS` 可直接指定带宽并跳过该询问。计算会为所选档位的 startup / cruise 增益、丢包补偿和测量波动预留空间；该值是每条连接的速率硬上限，不是整机总限速。
-9. 应用前显示最终完整参数并要求确认。`ssctl set-module-config` 是全量覆盖接口，因此总是一次性写入所选档位的全部 15 个模块参数（包括 `min-cwnd-packets`）和动态 `max-pacing-mbps`，不使用 `reset-module-config`，避免升级机器的旧配置文件影响“默认档”。
+8. `max-pacing-mbps` 按机器上行能力动态计算：仅在 Skyline 安装流程内选择带宽来源——自动 Ookla Upload 测速，或跳过测速手动填写上行带宽（`SPEED_BANDWIDTH_MBPS` 可直接指定并跳过询问）。它是每条连接的速率硬上限，不是整机总限速。其余 14 个配方参数不做任何动态改动。
+9. 应用前显示最终完整参数并要求确认。`ssctl set-module-config` 是全量覆盖接口，因此总是一次性写入配方 14 个参数（包括 `min-cwnd-packets`）加上动态 `max-pacing-mbps`，共 15 个；默认档的显式参数与新版 `ssctl` 内置默认值一致，即便升级机器的 `speeder.toml` 仍是旧值也能落到新默认档，所以不使用 `reset-module-config`。
 10. 下载 Skyline Speeder 的 `install.sh` 并显式调用 `--prebuilt`：新版安装器默认源码编译，Speed Slayer 为免装 clang、LLVM、Rust 而选择预编译包；支持 `SKYLINE_RELEASE` 锁定版本和 `SKYLINE_ARTIFACT_URL` 指定本地/镜像包。安装器会校验可用的 SHA256；上游没有摘要时会提示仅依赖 TLS 信任。
 11. 应用用户确认的模块参数，然后执行 `ssctl reset-rack-rto`，不再自动创建自定义 RACK RTO 策略，最后输出 `ssctl status`。
 
@@ -251,14 +251,33 @@ STUN RTT 探测默认使用 `stun.hitv.com:3478`，但会直接连接以下指�
 
 该阶段会自动安装缺失依赖：`tcpdump`、`coturn`（提供 `turnutils_stunclient`）、`iproute2` 和 `coreutils`。STUN 请求和响应是真实 UDP 应用层往返，和 `hping3` 仅依靠 UDP/ICMP 报文的推断不同；它仍不是 iperf3 固定速率 UDP 打流，因此 RTT 不代表上传带宽，也不会被脚本用于自动选择参数档。Skyline 安装时会单独询问带宽来源（除非显式设置 `SPEED_BANDWIDTH_MBPS`），可选 Ookla Upload 测速或手动输入；这个选项不会出现在其他测速流程中。
 
-动态 `max-pacing-mbps` 的计算形式为：
+四档配方的 14 个非上限参数逐项照抄 usage.md「四档现成配方」一节：
+
+| 参数 | ① 保守 | ② 默认 | ③ 激进 | ④ 旧默认 |
+|---|---:|---:|---:|---:|
+| `max-cwnd-packets` | 50000 | 50000 | 100000 | 50000 |
+| `max-queue-delay-ms` / `ratio` | 50 / 0.5 | 70 / 0.6 | 200 / 2.0 | 100 / 1.0 |
+| `initial-cwnd-packets` | 50 | 100 | 200 | 100 |
+| `min-cwnd-packets` | 4 | 4 | 4 | 4 |
+| `min-rtt-window-s` | 30 | 30 | 30 | 10 |
+| `bw-window-rtts` | 6 | 6 | 10 | 10 |
+| `startup-plateau-rtts` / `growth-ratio` | 3 / 0.25 | 5 / 0.20 | 5 / 0.15 | 3 / 0.25 |
+| `startup-gain` | 2.0 | 3.0 | 4.0 | 3.0 |
+| `cruise-inflight-gain` | 1.5 | 3.0 | 3.0 | 2.0 |
+| `cruise-pacing-gain` | 1.05 | 1.25 | 1.3 | 1.1 |
+| `guardrail-gain` | 0.7 | 0.8 | 1.0 | 0.8 |
+| `loss-inflation-max-ratio` | 0.10 | 0.10 | 0.5 | 0.5 |
+
+选择“只调整 gain”时，仅 `guardrail-gain`（0-1.0）或 `cruise-pacing-gain`（≥1.0）在所选档位基础上被替换，其余参数仍按配方原值下发。
+
+`max-pacing-mbps` 是唯一按机器动态计算的参数。usage.md 四档配方将它固定为 1200/2000，这是面向通用机器的值：低带宽机器上它远高于线路能力、不起作用，高带宽机器（>1Gbps）上它反而会反过来卡住档位的 pacing 目标速率。因此 Speed Slayer 按实测或手动填写的上行带宽计算：
 
 ```text
 ceil(上行 Mbps × max(startup-gain, cruise-pacing-gain)
      × min(2, 1/(1-loss-inflation-max-ratio)) × 1.10)
 ```
 
-最终值限制在 `1-100000Mbps`，只用于避免硬上限过小或异常过大；低带宽机器不会被强制设为固定的 `1200Mbps`。由于 `max-pacing-mbps` 是每条连接的硬上限，脚本会让它高于所选档位的预期 pacing 速率，避免硬上限反过来限制档位。
+增益取所选档位（含 gain 调整后）startup 与 cruise-pacing 的较大者；丢包补偿按 `1/(1-p)` 计，封顶 2 倍；再留 10% 余量。结果限制在 `1-100000Mbps`。参考值：默认档 100Mbps 上行算出 367，1000Mbps 算出 3667；激进档 100Mbps 算出 880（loss 0.5 触发 2 倍补偿）。Skyline 是闭环控制器，没有 bandwidth 参数；带宽值只用于推导这个硬上限，并写入档案备查。
 
 可指定探测参数：
 
