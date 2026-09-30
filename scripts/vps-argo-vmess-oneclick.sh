@@ -7,7 +7,7 @@ set -euo pipefail
 # - Argo VMess+WS: native cloudflared + Xray + Nginx implementation, no ArgoX install chain.
 
 REPO_RAW_BASE="https://raw.githubusercontent.com/Suyunmeng/tcpspeed-optimization/main"
-SPEED_SLAYER_VERSION="v2.0.9"
+SPEED_SLAYER_VERSION="v2.0.10"
 PROJECT_URL="https://github.com/Suyunmeng/tcpspeed-optimization"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo .)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd 2>/dev/null || echo .)"
@@ -1151,7 +1151,7 @@ skyline_apply_selected_profile() {
   # shellcheck disable=SC1090
   . "$SKYLINE_PROFILE_FILE"
   # set-module-config is a full replacement interface. Always pass every
-  # value from the selected usage.md recipe, including the dynamic cap. Do not
+  # value from the selected usage.md recipe, including max-pacing-mbps. Do not
   # use reset-module-config here: on upgraded hosts it restores the old values
   # from speeder.toml rather than the current usage.md defaults.
   ssctl set-module-config \
@@ -1191,6 +1191,69 @@ skyline_status() {
     echo "执行：speed --skyline"
     return 1
   fi
+}
+
+skyline_retransmit_dscp_set() {
+  require_root
+  render_header_once
+  section "Speed Slayer · Skyline 重传包 DSCP 标记"
+  if ! command -v ssctl >/dev/null 2>&1 || [ ! -S /run/skyline-speeder/speeder.sock ]; then
+    err "Skyline Speeder 尚未运行，无法设置重传包 DSCP 标记。"
+    echo "如尚未安装，请执行：speed --skyline"
+    return 1
+  fi
+  [ -t 0 ] || {
+    err "设置 DSCP 值需要交互式终端；请在终端执行 speed --skyline-dscp-set。"
+    return 1
+  }
+
+  local dscp_value=""
+  while true; do
+    read -r -p "请输入重传包 DSCP 值（1-63，0 表示未设置）: " dscp_value || dscp_value=""
+    if [[ "$dscp_value" =~ ^[0-9]+$ ]] && [ "$dscp_value" -ge 1 ] && [ "$dscp_value" -le 63 ]; then
+      break
+    fi
+    warn "DSCP 值必须是 1-63 的整数；0 会被 Skyline 拒绝为启用值。"
+  done
+
+  echo "将仅设置重传 TCP 包的 DSCP codepoint=${dscp_value}。"
+  echo "不会修改模块参数、RACK RTO、首轮冗余或其它 Skyline 配置。"
+  if ! confirm_action "确认启用重传包 DSCP 标记？默认回车 = Y"; then
+    warn "已取消 DSCP 标记设置。"
+    return 0
+  fi
+  mkdir -p "$WORK_DIR"
+  ssctl set-retransmit-dscp --dscp-value "$dscp_value" >>"$SKYLINE_LOG_FILE" 2>&1 || {
+    err "重传包 DSCP 标记设置失败，日志：$SKYLINE_LOG_FILE"
+    return 1
+  }
+  success "已启用重传包 DSCP 标记：codepoint=${dscp_value}。"
+  echo "恢复 Skyline 配置文件中的默认值：speed --skyline-dscp-reset"
+  echo "详细日志：$SKYLINE_LOG_FILE"
+}
+
+skyline_retransmit_dscp_reset() {
+  require_root
+  render_header_once
+  section "Speed Slayer · 恢复 Skyline 重传包 DSCP 默认标记"
+  if ! command -v ssctl >/dev/null 2>&1 || [ ! -S /run/skyline-speeder/speeder.sock ]; then
+    err "Skyline Speeder 尚未运行，无法恢复重传包 DSCP 默认标记。"
+    echo "如尚未安装，请执行：speed --skyline"
+    return 1
+  fi
+  echo "将仅恢复 [retransmit_dscp] 的配置文件默认值。"
+  echo "不会修改模块参数、RACK RTO、首轮冗余或其它 Skyline 配置。"
+  if ! confirm_action "确认恢复重传包 DSCP 默认标记？默认回车 = Y"; then
+    warn "已取消 DSCP 默认值恢复。"
+    return 0
+  fi
+  mkdir -p "$WORK_DIR"
+  ssctl reset-retransmit-dscp >>"$SKYLINE_LOG_FILE" 2>&1 || {
+    err "重传包 DSCP 默认标记恢复失败，日志：$SKYLINE_LOG_FILE"
+    return 1
+  }
+  success "已恢复 Skyline 配置文件中的重传包 DSCP 默认标记。"
+  echo "详细日志：$SKYLINE_LOG_FILE"
 }
 
 skyline_is_installed() {
@@ -2901,6 +2964,8 @@ Commands:
   --skyline              安装并手动选择 Skyline 配置（免编译工具链）
   --skyline-reconfigure  重设已安装 Skyline 的档位配置（不重走安装流程）
   --skyline-status       查看 Skyline Speeder 状态
+  --skyline-dscp-set     设置/启用重传包 DSCP 标记（交互输入 1-63）
+  --skyline-dscp-reset   恢复重传包 DSCP 的 Skyline 配置默认值
   --skyline-rollback     卸载并回滚 Skyline Speeder 特殊优化配置
   --optimize             单独执行 TCP 调优流程：BBR/XanMod/容器降级 + 网络参数
   --argo                 单独执行 Argo VMess+WS 节点流程（等同 --install-argo-vmess）
@@ -2988,6 +3053,8 @@ menu_section_tcp() {
 6. 查看 Skyline Speeder 状态
 7. 重启后继续安装
 8. 回滚 Skyline Speeder 特殊优化
+9. 设置/启用 Skyline 重传包 DSCP 标记
+10. 恢复 Skyline 重传包 DSCP 默认标记
 0. 返回主页
 EOF
     read -r -p "请选择: " choice
@@ -3000,6 +3067,8 @@ EOF
       6) skyline_status; menu_pause ;;
       7) continue_after_reboot; menu_pause ;;
       8) skyline_rollback; menu_pause ;;
+      9) skyline_retransmit_dscp_set; menu_pause ;;
+      10) skyline_retransmit_dscp_reset; menu_pause ;;
       0) return 0 ;;
       *) err "无效选择"; menu_pause ;;
     esac
@@ -3109,6 +3178,8 @@ case "${1:-}" in
   --skyline) run_skyline_optimize ;;
   --skyline-reconfigure) run_skyline_reconfigure ;;
   --skyline-status) skyline_status ;;
+  --skyline-dscp-set) skyline_retransmit_dscp_set ;;
+  --skyline-dscp-reset) skyline_retransmit_dscp_reset ;;
   --skyline-rollback) skyline_rollback ;;
   --optimize) run_tcp_optimize ;;
   --argo) install_argo_vmess_ws ;;

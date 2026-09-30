@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.0.9-22c55e">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.0.10-22c55e">
   <img alt="Shell" src="https://img.shields.io/badge/shell-bash-0891b2">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu-f97316">
   <img alt="Status" src="https://img.shields.io/badge/status-stable-16a34a">
@@ -179,6 +179,8 @@ TCP 子菜单包含：
 6. 查看 Skyline Speeder 状态
 7. 重启后继续安装
 8. 回滚 Skyline Speeder 特殊优化
+9. 设置/启用 Skyline 重传包 DSCP 标记
+10. 恢复 Skyline 重传包 DSCP 默认标记
 0. 返回主页
 ```
 
@@ -199,6 +201,8 @@ speed --tcp-skyline    # 执行已有 TCP 调优，然后安装并手动选择 S
 speed --skyline        # 仅安装并手动选择 Skyline 配置（免编译工具链）
 speed --skyline-reconfigure # 重设已安装 Skyline 的档位配置（不重走安装流程）
 speed --skyline-status # 查看 Skyline Speeder 运行状态
+speed --skyline-dscp-set # 设置/启用重传包 DSCP 标记（交互输入 1-63）
+speed --skyline-dscp-reset # 恢复重传包 DSCP 的 Skyline 配置默认值
 speed --skyline-rollback # 卸载 Skyline 并回滚特殊优化配置
 speed --optimize       # 等同 speed --tcp
 speed --argo           # 单独部署 Argo VMess+WS 节点
@@ -301,7 +305,7 @@ SKYLINE_RTT_FALLBACK_MS=180 speed --skyline
 sudo /opt/skyline-speeder/infra/run-in-skyline-cgroup.sh <服务启动命令...>
 ```
 
-DSCP 重传标记不会被 Speed Slayer 自动开启。它只有在运营商、机房或上游网络明确提供 DSCP 值时才应该手动配置，否则可能被忽略、误分流或限速。确认拿到非零值后，可手动执行 `ssctl set-retransmit-dscp --dscp-value <值>`；不再使用时执行 `ssctl reset-retransmit-dscp`。
+DSCP 重传标记不会被 Speed Slayer 自动开启。它只有在运营商、机房或上游网络明确提供 DSCP 值时才应该手动配置，否则可能被忽略、误分流或限速。确认拿到非零值后，可执行 `speed --skyline-dscp-set` 交互输入 1-63 的 DSCP 值；恢复 Skyline 配置文件中的默认标记执行 `speed --skyline-dscp-reset`。这两个操作只调用 `ssctl set-retransmit-dscp` / `reset-retransmit-dscp`，不会覆盖模块参数、RACK RTO、首轮冗余或其它 Skyline 配置。设置属于运行期配置，重启后以 `/etc/skyline-speeder/speeder.toml` 中的 `[retransmit_dscp]` 为准。
 
 如果需要撤销这次特殊优化，执行：
 
@@ -567,7 +571,11 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 
 ## 版本
 
-当前正式版：`v2.0.9`
+当前正式版：`v2.0.10`
+
+### v2.0.10
+
+- 新增独立的 Skyline 重传包 DSCP 标记设置和默认值恢复命令，不覆盖其它 Skyline 配置。
 
 ### v2.0.9
 
