@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+- Skyline Speeder 安装器默认锁定到 commit `bfd921412ece45c0ce70d4f1c2d3e0d5aa8f1e76`（v0.4.2）。
+- 四档 Skyline 配方的 `min-cwnd-packets` 从 4 同步为新版 usage.md 的 32。
+- Skyline 回滚改用 `--restore-pre-install`，恢复安装前记录的拥塞控制和队列配置。
+- Speed Slayer 版本号更新为 `v2.0.9`。
+
 ### Added
 - 新增 `speed --tcp-skyline`，在已有 TCP 调优完成后可选安装 Skyline Speeder。
 - 新增 `speed --skyline` / `speed --skyline-status` / `speed --skyline-rollback` 及 TCP 子菜单入口。

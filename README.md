@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.0.8-22c55e">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.0.9-22c55e">
   <img alt="Shell" src="https://img.shields.io/badge/shell-bash-0891b2">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu-f97316">
   <img alt="Status" src="https://img.shields.io/badge/status-stable-16a34a">
@@ -269,7 +269,7 @@ STUN RTT 探测默认使用 `stun.hitv.com:3478`，但会直接连接以下指�
 | `max-cwnd-packets` | 50000 | 50000 | 100000 | 50000 |
 | `max-queue-delay-ms` / `ratio` | 50 / 0.5 | 70 / 0.6 | 200 / 2.0 | 100 / 1.0 |
 | `initial-cwnd-packets` | 50 | 100 | 200 | 100 |
-| `min-cwnd-packets` | 4 | 4 | 4 | 4 |
+| `min-cwnd-packets` | 32 | 32 | 32 | 32 |
 | `min-rtt-window-s` | 30 | 30 | 30 | 10 |
 | `bw-window-rtts` | 6 | 6 | 10 | 10 |
 | `startup-plateau-rtts` / `growth-ratio` | 3 / 0.25 | 5 / 0.20 | 5 / 0.15 | 3 / 0.25 |
@@ -567,7 +567,13 @@ Speed Slayer 的 TCP 调优方向参考了他的思路，并在此基础上做�
 
 ## 版本
 
-当前正式版：`v2.0.8`
+当前正式版：`v2.0.9`
+
+### v2.0.9
+
+- 锁定 Skyline Speeder 安装器到 v0.4.2 对应 commit `bfd921412ece45c0ce70d4f1c2d3e0d5aa8f1e76`。
+- 同步新版 Skyline 四档配方的 `min-cwnd-packets=32`。
+- Skyline 回滚使用 `--restore-pre-install`，恢复安装前的拥塞控制和队列配置。
 
 ### v2.0.8
 
